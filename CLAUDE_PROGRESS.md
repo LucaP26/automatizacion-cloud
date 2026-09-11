@@ -13,6 +13,14 @@ haber contexto que no está en el código todavía (decisiones a medio tomar,
 bloqueos de entorno, etc). Hacé `git pull` antes de asumir que esto está
 actualizado: la otra máquina puede haber escrito acá sin que lo hayas visto.
 
+**Cuándo borrar este archivo:** este archivo es una herramienta de trabajo
+para mientras el proyecto está en desarrollo activo entre dos máquinas — no
+es documentación final. Una vez que el proyecto esté terminado (todas las
+fases del `prompt_claude_code.md` completas y revisadas por Luca), borrar
+`CLAUDE_PROGRESS.md` del repo como parte del cleanup final, ya que para ese
+momento ya no aporta nada que no esté en el código, el README o el historial
+de git.
+
 ---
 
 ## 2026-09-11 — PC de escritorio (Windows 10 Home, build 19045)
