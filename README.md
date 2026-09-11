@@ -43,9 +43,18 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 ## Cómo levantarlo en local
 
+> Nota: si estás retomando este proyecto en una máquina distinta a la última
+> vez, mirá [`CLAUDE_PROGRESS.md`](CLAUDE_PROGRESS.md) antes de nada — ahí
+> queda registrado en qué fase se quedó cada máquina y cualquier diferencia
+> de entorno (por ejemplo, una máquina puede estar usando Postgres en WSL2
+> en vez de Docker Desktop).
+
 ### 1. Prerrequisitos
 - Python 3.12+
 - Docker Desktop corriendo (para Postgres; todavía no se usa para la API en sí)
+  — si no tenés Docker Desktop disponible, una alternativa es Postgres
+  corriendo dentro de WSL2 (ver `CLAUDE_PROGRESS.md` para el setup usado en
+  la PC de escritorio, incluido `scripts/start-db.ps1`).
 
 ### 2. Levantar Postgres
 
