@@ -23,6 +23,57 @@ de git.
 
 ---
 
+## 2026-09-11 — Laptop
+
+**Contexto:** Respuesta a la entrada de la PC de escritorio de más abajo — Luca
+no perdió el chat de la laptop, seguía activo. Se sincronizó este archivo y
+los commits de la PC de escritorio vía `git pull` (fuera de esta sesión de
+Claude Code) y se los leyó antes de seguir.
+
+**Cómo está Postgres acá:** Docker Desktop instalado y funcionando sin
+problemas — el container `automation-postgres` viene corriendo desde que se
+armó la Fase 1, sin caerse. No hace falta nada del setup de WSL2/
+`scripts/start-db.ps1` que se usó en la PC de escritorio; ese script es
+específico de esa máquina.
+
+**En qué fase quedamos:** Fase 1 completa, commiteada y pusheada a `main`
+(commit `49a4e37`, mismo que ya tenía la PC de escritorio). No se había
+avanzado nada de la Fase 2 sin commitear antes de esto, así que no se perdió
+trabajo — arrancamos la Fase 2 recién ahora, en esta sesión.
+
+**Fase 2 (scheduler), progreso hasta acá, en la branch `fase-2-scheduler`:**
+- `requirements.txt`: se agregó `apscheduler==3.10.4`.
+- `app/services/scheduler.py`: escrito y verificado. Decisiones tomadas:
+  `BackgroundScheduler` (no `AsyncIOScheduler`, porque toda la app es
+  sync/bloqueante — subprocess, SQLAlchemy sync); job store **en memoria**,
+  no `SQLAlchemyJobStore` — la fuente de verdad del schedule es la tabla
+  `automations`, así que en cada arranque se reconstruye el schedule entero
+  leyendo las automatizaciones activas, en vez de mantener una tabla
+  `apscheduler_jobs` que puede desincronizarse de `automations` si alguien
+  edita el cron directo en la base.
+- **Hallazgo importante de APScheduler, para no repetir el error:**
+  `add_job(..., replace_existing=True)` NO deduplica si el scheduler todavía
+  no arrancó (`scheduler.start()`) — antes de arrancar, los jobs quedan en
+  una lista interna `_pending_jobs` que no aplica `replace_existing` entre
+  sí misma, y al hacer `start()` los pendientes duplicados sobreviven todos.
+  Verificado empíricamente. Por eso en `main.py` el orden va a ser
+  `scheduler.start()` primero, `load_scheduled_automations(db)` después —
+  al revés de lo que parecía natural al principio.
+- **Pendiente en esta sesión:** modificar `app/main.py` para agregar un
+  `lifespan` (arranca el scheduler + carga automatizaciones activas al
+  iniciar, `scheduler.shutdown()` al apagar); conectar `schedule_automation`/
+  `unschedule_automation` a los endpoints de crear/editar/borrar/activar en
+  `app/routers/automations.py`; un test que confirme que una automatización
+  con cron de "cada minuto" corre sola.
+
+**Para la sesión de la PC de escritorio:** cuando retomes ahí, hacé
+`git pull` antes de nada — vas a encontrar `apscheduler` en requirements y
+`app/services/scheduler.py` nuevo. Todavía no toqué `main.py` ni los
+routers, así que si llegás a esa parte antes que yo, avisá acá para no
+pisarnos.
+
+---
+
 ## 2026-09-11 — PC de escritorio (Windows 10 Home, build 19045)
 
 **Contexto:** Luca perdió el chat de la laptop y arrancó una sesión nueva acá.
