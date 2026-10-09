@@ -28,7 +28,8 @@ pytestmark = pytest.mark.slow
 def test_automation_with_minute_cron_runs_on_its_own():
     db = SessionLocal()
     user = db.query(User).first()
-    if user is None:
+    created_user = user is None
+    if created_user:
         user = User(email="scheduler-integration-test@example.com")
         db.add(user)
         db.commit()
@@ -70,4 +71,7 @@ def test_automation_with_minute_cron_runs_on_its_own():
             if automation is not None:
                 db.delete(automation)  # cascade borra la Execution tambien
                 db.commit()
+        if created_user:
+            db.delete(user)
+            db.commit()
         db.close()

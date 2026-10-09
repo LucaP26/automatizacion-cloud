@@ -1,3 +1,5 @@
+import logging
+
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -7,7 +9,30 @@ from app.database import SessionLocal
 from app.models.automation import Automation
 from app.services.executor import run_automation_script
 
+logger = logging.getLogger(__name__)
+
 scheduler = BackgroundScheduler()
+
+
+def start_scheduler() -> None:
+    """Arranca el scheduler con una instancia NUEVA, no reutiliza la anterior.
+
+    BackgroundScheduler.start() despues de un shutdown() no revive su
+    ThreadPoolExecutor -- queda muerto para siempre, y los jobs que se
+    agendan despues fallan en silencio (APScheduler solo lo loguea
+    internamente, nunca levanta la excepcion). Esto importa en los tests:
+    el fixture `client` entra/sale de `TestClient(app)` en cada test, lo
+    que dispara el lifespan (start/shutdown) una vez por test sobre el
+    mismo singleton de modulo -- sin esto, el segundo test ya hereda un
+    scheduler con el executor muerto.
+    """
+    global scheduler
+    scheduler = BackgroundScheduler()
+    scheduler.start()
+
+
+def stop_scheduler() -> None:
+    scheduler.shutdown()
 
 
 def _run_automation_job(automation_id: int) -> None:
@@ -41,4 +66,12 @@ def unschedule_automation(automation_id: int) -> None:
 def load_scheduled_automations(db: Session) -> None:
     automations = db.query(Automation).filter(Automation.is_active.is_(True)).all()
     for automation in automations:
-        schedule_automation(automation)
+        try:
+            schedule_automation(automation)
+        except ValueError:
+            logger.exception(
+                "No se pudo agendar automation_id=%s (cron_expression=%r); "
+                "se omite para no abortar el arranque del resto.",
+                automation.id,
+                automation.cron_expression,
+            )

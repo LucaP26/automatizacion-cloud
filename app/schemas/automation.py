@@ -1,7 +1,20 @@
 from datetime import datetime
 
-from croniter import croniter
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+def _validate_cron(value: str) -> str:
+    # Se valida con el mismo parser que despues usa el scheduler
+    # (CronTrigger.from_crontab), no con croniter: croniter acepta
+    # extensiones ("L", "1#2") que CronTrigger rechaza, y antes esa
+    # discrepancia dejaba pasar automatizaciones que crasheaban el
+    # arranque de la app al intentar agendarlas.
+    try:
+        CronTrigger.from_crontab(value)
+    except ValueError as exc:
+        raise ValueError(f"'{value}' no es una expresión cron válida: {exc}") from exc
+    return value
 
 
 class AutomationBase(BaseModel):
@@ -13,9 +26,7 @@ class AutomationBase(BaseModel):
     @field_validator("cron_expression")
     @classmethod
     def validate_cron(cls, value: str) -> str:
-        if not croniter.is_valid(value):
-            raise ValueError(f"'{value}' no es una expresión cron válida")
-        return value
+        return _validate_cron(value)
 
 
 class AutomationCreate(AutomationBase):
@@ -31,9 +42,9 @@ class AutomationUpdate(BaseModel):
     @field_validator("cron_expression")
     @classmethod
     def validate_cron(cls, value: str | None) -> str | None:
-        if value is not None and not croniter.is_valid(value):
-            raise ValueError(f"'{value}' no es una expresión cron válida")
-        return value
+        if value is None:
+            return None
+        return _validate_cron(value)
 
 
 class AutomationRead(AutomationBase):
