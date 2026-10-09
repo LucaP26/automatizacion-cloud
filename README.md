@@ -2,13 +2,14 @@
 
 Plataforma web para registrar scripts de Python, programarlos con cron, ejecutarlos y ver el resultado de cada corrida. Proyecto de portfolio enfocado en backend + DevOps: arquitectura de API prolija, containerización con propósito y CI/CD real.
 
-## Estado actual: Fase 1 — Core
+## Estado actual: Fase 2 — Scheduler
 
 - CRUD de automatizaciones (`Automation`).
-- Ejecución manual de una automatización vía `subprocess`, sin aislamiento todavía y sin scheduler (eso llega en las fases siguientes).
+- Ejecución manual vía `subprocess`, sin aislamiento todavía (eso llega en la Fase 3).
 - Historial de ejecuciones (`Execution`) con status, logs y timestamps.
+- **Las automatizaciones activas corren solas según su cron**, sin que nadie llame a `/run` — scheduler con APScheduler, integrado al ciclo de vida de la API.
 
-Fases siguientes (spec completa en `prompt_claude_code.md`): scheduler con APScheduler, aislamiento en Docker + secretos encriptados, auth JWT + notificaciones, infraestructura con Docker Compose / Terraform / GitHub Actions.
+Fases siguientes (spec completa en `prompt_claude_code.md`): aislamiento en Docker + secretos encriptados, auth JWT + notificaciones, infraestructura con Docker Compose / Terraform / GitHub Actions.
 
 ## Arquitectura
 
@@ -20,7 +21,7 @@ app/
   models/           # entidades ORM (User, Automation, Execution)
   schemas/          # contratos Pydantic de entrada/salida (independientes del ORM)
   routers/          # capa HTTP: valida con schemas, delega en services
-  services/         # lógica de negocio (ejecución de scripts, futuro scheduler)
+  services/         # lógica de negocio: ejecución de scripts (executor.py) y scheduling (scheduler.py)
 alembic/            # migraciones de base de datos
 tests/              # pytest, contra una base de datos Postgres separada
 ```
@@ -40,6 +41,16 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 **Alembic para migraciones, no `Base.metadata.create_all()`.** `create_all()` solo crea tablas que no existen — no sabe alterar una tabla que ya tiene datos (por ejemplo, agregarle una columna nueva a `users` en la Fase 4). Alembic versiona cada cambio de schema como un script con `upgrade()`/`downgrade()`, encadenado al anterior, aplicable de forma repetible en cualquier entorno. El `--autogenerate` compara los modelos contra el estado real de la base y genera el diff, pero cada migración generada se revisa a mano antes de aplicarla — el autogenerate no siempre acierta (por ejemplo, un rename de columna lo ve como "borrar una y crear otra").
 
 **Dependency injection con `Depends(get_db)` + `app.dependency_overrides` en tests.** Cada endpoint recibe su propia sesión de base de datos a través de `Depends(get_db)`, en vez de una sesión global compartida — así requests concurrentes no se pisan. En los tests, `app.dependency_overrides[get_db]` reemplaza esa dependencia por una versión que apunta a la base de test y la envuelve en una transacción descartable, sin tener que tocar ni una línea del código de producción.
+
+**APScheduler en vez de Celery.** Celery necesita infraestructura aparte (un broker como Redis/RabbitMQ, al menos un proceso worker independiente) — la herramienta correcta cuando hay que distribuir trabajo entre varios workers en varias máquinas con colas reales. Para una sola instancia de API con pocas automatizaciones, eso es sobre-ingeniería: APScheduler corre *adentro* del mismo proceso, sin piezas adicionales. El trade-off consciente: si el día de mañana la API corre en más de una instancia en paralelo, cada una tendría su propio scheduler y dispararía el mismo job dos veces — un problema que Celery no tiene. Para el tamaño actual del proyecto, es la elección correcta; con más escala, dejaría de serlo.
+
+**`BackgroundScheduler`, no `AsyncIOScheduler`.** Toda la app es síncrona (routers con `def`, no `async def`; `subprocess.run` bloqueante). `BackgroundScheduler` corre cada job en un hilo de un pool, desacoplado del event loop — consistente con el resto del código. `AsyncIOScheduler` asume que la app corre sobre asyncio; usarlo con código sync bloqueante arriesga trabar el event loop entero.
+
+**Job store en memoria, no `SQLAlchemyJobStore`.** La fuente de verdad de qué debería estar programado es la tabla `automations` (con su `cron_expression` e `is_active`), no un almacén separado de APScheduler. En cada arranque de la API, el schedule completo se reconstruye leyendo las automatizaciones activas (`load_scheduled_automations`) — más simple que mantener una tabla `apscheduler_jobs` sincronizada aparte, y evita que las dos fuentes de verdad se desincronicen entre sí (por ejemplo, si alguien edita el cron directo en la base).
+
+**Hallazgo de APScheduler que vale la pena documentar:** `scheduler.add_job(..., replace_existing=True)` no deduplica si se llama *antes* de `scheduler.start()` — antes de arrancar, los jobs quedan en una lista interna (`_pending_jobs`) que no aplica `replace_existing` entre sí misma, y al arrancar, duplicados sobreviven todos. Por eso en el `lifespan` de `main.py` el scheduler arranca *antes* de cargar los jobs, no después.
+
+**El scheduler usa la base real, no `get_db()`.** El job que dispara un cron corre en un hilo aparte, con su propia sesión (`SessionLocal` de `app.database` directo) — no pasa por la inyección de dependencias de FastAPI, así que `app.dependency_overrides` no lo alcanza en los tests. Por eso el test que verifica un cron disparando solo (`tests/test_scheduler_integration.py`) no usa las fixtures `client`/`db_session` de siempre: usa la base real configurada y limpia a mano lo que crea, en vez de depender del rollback automático del resto de la suite.
 
 ## Cómo levantarlo en local
 
@@ -114,7 +125,11 @@ La API queda en `http://localhost:8000`, docs interactivas (Swagger, autogenerad
 pytest
 ```
 
-Corren contra `automation_test_db`, nunca contra la base de desarrollo.
+Corren contra `automation_test_db`, nunca contra la base de desarrollo. Por default no incluyen el test de integración real del scheduler (marcado `slow`, tarda hasta ~65s porque espera a que un cron real dispare) — para correrlo:
+
+```powershell
+pytest tests/test_scheduler_integration.py -m slow
+```
 
 ### Manualmente con curl
 
