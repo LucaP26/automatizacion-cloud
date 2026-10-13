@@ -7,6 +7,7 @@ from app.models.execution import Execution
 from app.schemas.automation import AutomationCreate, AutomationRead, AutomationUpdate
 from app.schemas.execution import ExecutionRead
 from app.services.executor import run_automation_script
+from app.services.scheduler import schedule_automation, unschedule_automation
 
 router = APIRouter(prefix="/automations", tags=["automations"])
 
@@ -24,6 +25,8 @@ def create_automation(payload: AutomationCreate, db: Session = Depends(get_db)) 
     db.add(automation)
     db.commit()
     db.refresh(automation)
+    if automation.is_active:
+        schedule_automation(automation)
     return automation
 
 
@@ -42,10 +45,16 @@ def update_automation(
     automation_id: int, payload: AutomationUpdate, db: Session = Depends(get_db)
 ) -> Automation:
     automation = _get_automation_or_404(db, automation_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updated_fields = payload.model_dump(exclude_unset=True)
+    for key, value in updated_fields.items():
         setattr(automation, key, value)
     db.commit()
     db.refresh(automation)
+    if "cron_expression" in updated_fields or "is_active" in updated_fields:
+        if automation.is_active:
+            schedule_automation(automation)
+        else:
+            unschedule_automation(automation.id)
     return automation
 
 
@@ -54,6 +63,7 @@ def delete_automation(automation_id: int, db: Session = Depends(get_db)) -> None
     automation = _get_automation_or_404(db, automation_id)
     db.delete(automation)
     db.commit()
+    unschedule_automation(automation_id)
     return None
 
 
