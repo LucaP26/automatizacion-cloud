@@ -4,6 +4,12 @@ from cryptography.fernet import Fernet
 
 from app.config import settings
 
+# Se construye una sola vez, al importar el modulo (que pasa al arrancar la
+# app, via routers/executor). Si SECRET_KEY no es una clave Fernet valida,
+# esto explota en el arranque -- fail fast -- en vez de recien en el primer
+# request que use secretos.
+_fernet = Fernet(settings.secret_key.encode())
+
 
 def encrypt_secrets(secrets: dict[str, str] | None) -> bytes | None:
     """Encripta el dict de env vars de una automatización para guardarlo en la DB.
@@ -14,8 +20,7 @@ def encrypt_secrets(secrets: dict[str, str] | None) -> bytes | None:
     """
     if not secrets:
         return None
-    fernet = Fernet(settings.secret_key.encode())
-    return fernet.encrypt(json.dumps(secrets).encode("utf-8"))
+    return _fernet.encrypt(json.dumps(secrets).encode("utf-8"))
 
 
 def decrypt_secrets(encrypted: bytes | None) -> dict[str, str]:
@@ -25,5 +30,4 @@ def decrypt_secrets(encrypted: bytes | None) -> dict[str, str]:
     """
     if not encrypted:
         return {}
-    fernet = Fernet(settings.secret_key.encode())
-    return json.loads(fernet.decrypt(encrypted).decode("utf-8"))
+    return json.loads(_fernet.decrypt(encrypted).decode("utf-8"))

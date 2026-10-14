@@ -48,7 +48,7 @@ def test_secrets_are_injected_as_env_vars_in_the_container(client, test_user):
     assert "valor-secreto-123" in body["output_log"]
 
 
-def test_script_cannot_read_arbitrary_host_files(client, test_user):
+def test_script_cannot_access_unmounted_host_files(client, test_user):
     with tempfile.TemporaryDirectory() as host_secret_dir:
         host_secret_path = Path(host_secret_dir) / "secreto_del_host.txt"
         host_secret_path.write_text("contenido-secreto-del-host", encoding="utf-8")
@@ -71,3 +71,28 @@ def test_script_cannot_read_arbitrary_host_files(client, test_user):
         body = response.json()
         assert "contenido-secreto-del-host" not in body["output_log"]
         assert "no se pudo leer" in body["output_log"]
+
+
+def test_script_cannot_write_to_its_own_mounted_script_file(client, test_user):
+    # A diferencia del test anterior (que prueba que no ve archivos del
+    # host que nunca se montaron), este prueba especificamente el flag
+    # read_only=True: el propio archivo que SI esta montado (/sandbox/script.py)
+    # tiene que ser de solo lectura.
+    script = (
+        "try:\n"
+        "    open('/sandbox/script.py', 'w').write('hack')\n"
+        "    print('ESCRIBIO -- no deberia poder')\n"
+        "except OSError as e:\n"
+        "    print('escritura bloqueada:', e)\n"
+    )
+
+    created = client.post(
+        "/automations",
+        json=_automation_payload(test_user.id, script_code=script),
+    ).json()
+
+    response = client.post(f"/automations/{created['id']}/run")
+
+    body = response.json()
+    assert "ESCRIBIO" not in body["output_log"]
+    assert "escritura bloqueada" in body["output_log"]
