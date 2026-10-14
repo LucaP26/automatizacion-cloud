@@ -1,4 +1,5 @@
 import tempfile
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from app.services.crypto import decrypt_secrets
 SANDBOX_IMAGE = "automation-sandbox:latest"
 
 _docker_client: docker.DockerClient | None = None
+_docker_client_lock = threading.Lock()
 
 
 def _get_docker_client() -> docker.DockerClient:
@@ -26,10 +28,16 @@ def _get_docker_client() -> docker.DockerClient:
     todavía no corriendo tiraría abajo el arranque completo de la API. Se
     crea perezoso, en el primer uso real, y se reusa después para no pagar
     esa negociación en cada ejecución.
+
+    El lock evita que dos ejecuciones que arrancan al mismo tiempo (dos
+    crons disparando juntos, o un cron solapado con un POST /run manual)
+    creen cada una su propio cliente y una se pierda sin cerrar su conexión.
     """
     global _docker_client
     if _docker_client is None:
-        _docker_client = docker.from_env()
+        with _docker_client_lock:
+            if _docker_client is None:  # otro hilo pudo haberlo creado ya
+                _docker_client = docker.from_env()
     return _docker_client
 
 
@@ -70,6 +78,17 @@ def _run_in_sandbox(execution: Execution, automation: Automation) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         script_path = Path(tmp_dir) / "script.py"
         script_path.write_text(automation.script_code, encoding="utf-8")
+
+        # tempfile.TemporaryDirectory() crea el directorio en modo 0700
+        # (solo el usuario que corre la API). El container corre con un UID
+        # distinto y sin privilegios (ver docker/sandbox.Dockerfile), así
+        # que en un host Linux real (a diferencia de Docker Desktop en
+        # Windows, cuya capa de compartir archivos no aplica permisos POSIX
+        # estrictos) ese UID no podría ni entrar al directorio montado.
+        # Sin este chmod, cada ejecución fallaría con un error de permisos
+        # apenas esto corra en un host Linux de verdad (CI, Azure).
+        Path(tmp_dir).chmod(0o755)
+        script_path.chmod(0o644)
 
         client = _get_docker_client()
         container = None

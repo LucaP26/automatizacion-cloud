@@ -13,6 +13,14 @@ def _automation_payload(user_id: int, **overrides):
     return payload
 
 
+def test_reserved_env_var_names_are_rejected(client, test_user):
+    payload = _automation_payload(test_user.id, secrets={"PATH": "/algo/raro"})
+
+    response = client.post("/automations", json=payload)
+
+    assert response.status_code == 422
+
+
 def test_secrets_never_appear_in_the_api_response(client, test_user):
     payload = _automation_payload(
         test_user.id, secrets={"API_KEY": "super-secreta-no-deberia-salir"}
