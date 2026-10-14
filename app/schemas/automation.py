@@ -31,6 +31,10 @@ class AutomationBase(BaseModel):
 
 class AutomationCreate(AutomationBase):
     user_id: int
+    # Env vars de la automatizacion (p.ej. API keys). Se encriptan antes de
+    # guardarse (ver crypto.py) y nunca viajan de vuelta en una respuesta --
+    # por eso vive solo en Create/Update, no en AutomationBase/Read.
+    secrets: dict[str, str] | None = None
 
 
 class AutomationUpdate(BaseModel):
@@ -38,6 +42,7 @@ class AutomationUpdate(BaseModel):
     script_code: str | None = None
     cron_expression: str | None = None
     is_active: bool | None = None
+    secrets: dict[str, str] | None = None
 
     @field_validator("cron_expression")
     @classmethod
