@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -15,6 +15,9 @@ class Automation(Base):
     script_code: Mapped[str] = mapped_column(Text)
     cron_expression: Mapped[str] = mapped_column(String(120))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Variables de entorno de la automatizacion, encriptadas (ver
+    # services/crypto.py). Nunca texto plano, nunca en AutomationRead.
+    secrets_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

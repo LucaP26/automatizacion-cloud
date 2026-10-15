@@ -7,6 +7,8 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 apscheduler==3.10.4
+docker==7.2.0
+cryptography==50.0.2
 
 # dependencias de desarrollo / tests
 pytest==8.3.4

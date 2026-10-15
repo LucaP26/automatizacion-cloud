@@ -2,14 +2,15 @@
 
 Plataforma web para registrar scripts de Python, programarlos con cron, ejecutarlos y ver el resultado de cada corrida. Proyecto de portfolio enfocado en backend + DevOps: arquitectura de API prolija, containerización con propósito y CI/CD real.
 
-## Estado actual: Fase 2 — Scheduler
+## Estado actual: Fase 3 — Aislamiento
 
 - CRUD de automatizaciones (`Automation`).
-- Ejecución manual vía `subprocess`, sin aislamiento todavía (eso llega en la Fase 3).
+- Las automatizaciones activas corren solas según su cron (scheduler con APScheduler), o manualmente vía `POST /automations/{id}/run`.
 - Historial de ejecuciones (`Execution`) con status, logs y timestamps.
-- **Las automatizaciones activas corren solas según su cron**, sin que nadie llame a `/run` — scheduler con APScheduler, integrado al ciclo de vida de la API.
+- **Cada ejecución corre dentro de un container Docker descartable**, no en el proceso de la API — con timeout, límites de memoria/CPU, y filesystem de solo lectura.
+- **Secretos (variables de entorno) por automatización, encriptados en la base**, inyectados al container solo en el momento de ejecutar — nunca en texto plano, nunca expuestos por la API.
 
-Fases siguientes (spec completa en `prompt_claude_code.md`): aislamiento en Docker + secretos encriptados, auth JWT + notificaciones, infraestructura con Docker Compose / Terraform / GitHub Actions.
+Fases siguientes (spec completa en `prompt_claude_code.md`): auth JWT + notificaciones, infraestructura con Docker Compose / Terraform / GitHub Actions.
 
 ## Arquitectura
 
@@ -32,7 +33,19 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **Modelos (`models/`) vs. schemas (`schemas/`), separados a propósito.** El modelo ORM define cómo se guardan los datos; el schema define el contrato JSON de la API. Son cosas que cambian por razones distintas: el día que `User` tenga `hashed_password` (Fase 4), ese campo no va a existir en `UserRead` — es estructuralmente imposible que se filtre en una respuesta, no depende de que alguien se acuerde de excluirlo a mano. Además, un objeto de SQLAlchemy ni siquiera es serializable a JSON directamente (tiene metadata interna del ORM, como `_sa_instance_state`) — el schema es el traductor obligatorio entre "objeto Python interno" y "JSON que viaja por HTTP", en los dos sentidos: valida lo que entra (por ejemplo, rechaza un cron inválido con 422 antes de tocar la base) y filtra lo que sale.
 
-**`subprocess` en esta fase, no Docker todavía.** El objetivo de la Fase 1 es validar el flujo completo (registrar → ejecutar → ver resultado) con la menor cantidad de piezas móviles. `subprocess` corre el script en un proceso del sistema operativo separado del proceso de la API — más aislado que un `exec()` en el mismo intérprete, pero lejos de ser seguro para código arbitrario de terceros (mismo filesystem, mismos permisos, mismas dependencias que la API). Por eso la Fase 3 lo reemplaza por ejecución en un container Docker aislado, con timeout y límites de recursos. El `timeout` ya es obligatorio desde esta fase (`EXECUTION_TIMEOUT_SECONDS`): sin él, un script con un loop infinito cuelga el request HTTP completo, porque en esta fase la ejecución es síncrona y bloqueante.
+**`subprocess` en la Fase 1, Docker desde la Fase 3.** El objetivo de la Fase 1 era validar el flujo completo (registrar → ejecutar → ver resultado) con la menor cantidad de piezas móviles. `subprocess` corre el script en un proceso del sistema operativo separado del proceso de la API — más aislado que un `exec()` en el mismo intérprete, pero lejos de ser seguro para código arbitrario de terceros (mismo filesystem, mismos permisos, mismas dependencias que la API). El `timeout` ya era obligatorio desde esa fase (`EXECUTION_TIMEOUT_SECONDS`): sin él, un script con un loop infinito cuelga el request HTTP completo, porque la ejecución es síncrona y bloqueante. En la Fase 3 el mecanismo de ejecución cambió por completo (ver más abajo), pero **la firma de `run_automation_script(db, automation)` nunca se tocó** — ni el router ni el scheduler se enteraron del cambio, solo `executor.py`.
+
+**Un container Docker por ejecución, no un pool de workers reutilizados.** Un container nuevo y descartable por cada corrida es más simple de razonar (nada persiste entre ejecuciones, no hay estado compartido que limpiar) y más seguro (una ejecución comprometida no contamina la siguiente). El costo es el overhead de arrancar un container cada vez — aceptable para este proyecto; un pool de workers reutilizados reduciría ese overhead a cambio de mucha más complejidad (y de tener que limpiar el estado entre usos a mano), algo que recién se justificaría con un volumen de ejecuciones mucho mayor.
+
+**El código del script se monta como volumen de solo lectura, nunca se bakea en la imagen.** El `Dockerfile` (`docker/sandbox.Dockerfile`) no copia nada del código de las automatizaciones — es una imagen base fija (`python:3.12-slim`, usuario sin privilegios) que se construye una sola vez. En cada ejecución, el código se escribe a un archivo temporal del host y se monta en `/sandbox` con `mode="ro"`. Si se bakeara el código en la imagen, cada automatización necesitaría su propia imagen (y reconstruirla en cada edición) — totalmente innecesario cuando Docker ya soporta montar archivos en runtime.
+
+**Filesystem de solo lectura + `tmpfs` para `/tmp`.** El container corre con `read_only=True` (todo el filesystem raíz es inmutable) salvo un `/tmp` efímero en memoria (`tmpfs`) para que librerías que necesiten escribir archivos temporales no fallen. Ni el código del script ni nada del sistema de archivos del container puede modificarse desde dentro — verificado en `tests/test_sandbox.py` y a mano (un intento de reescribir `/sandbox/script.py` tira `OSError: Read-only file system`).
+
+**Secretos encriptados con Fernet, nunca en el `script_code`.** Antes de esta fase, si una automatización necesitaba una API key, la única opción era pegarla directo en el texto del script — texto plano en la base de datos. Ahora cada automatización tiene un campo `secrets_encrypted` (encriptado con `cryptography.fernet.Fernet`, clave en `SECRET_KEY`), que solo se desencripta en el momento de lanzar el container, inyectado como variables de entorno. El schema `AutomationRead` nunca incluye `secrets` ni `secrets_encrypted` — mismo patrón que `hashed_password` en `User`: estructuralmente imposible que se filtre en una respuesta.
+
+**Hallazgo de plataforma al manejar el timeout del container:** `container.wait(timeout=...)` del SDK de Docker, al vencer el timeout, tira `requests.exceptions.ReadTimeout` en Linux/Mac (socket Unix) pero `requests.exceptions.ConnectionError` en Windows con Docker Desktop (transporte vía named pipe) — hay que atrapar los dos para que el timeout funcione igual en cualquier plataforma. Verificado empíricamente en ambos casos.
+
+**Trade-off consciente: la red del container queda habilitada por default.** Muchas automatizaciones reales necesitan llamar a una API externa (el ejemplo que venimos usando: un reporte del clima). Deshabilitar la red por default rompería ese caso de uso legítimo. El aislamiento de esta fase se enfoca en filesystem, memoria, CPU y tiempo — no en red. Si en el futuro se necesitara bloquear red para automatizaciones específicas, `network_disabled=True` es un parámetro más a exponer por automatización, no un cambio de arquitectura.
 
 **Un `User` mínimo ya en Fase 1, sin password.** `Automation` necesita un `user_id` con integridad referencial real (foreign key), no un entero suelto sin garantías. Se creó una tabla `users` mínima (`id`, `email`, `created_at`) para tener esa FK desde el principio, sin agregar campos de auth (`hashed_password`) que todavía no tienen ningún endpoint que los use — eso llega recién en la Fase 4, con su propia migración.
 
@@ -62,10 +75,13 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 ### 1. Prerrequisitos
 - Python 3.12+
-- Docker Desktop corriendo (para Postgres; todavía no se usa para la API en sí)
-  — si no tenés Docker Desktop disponible, una alternativa es Postgres
-  corriendo dentro de WSL2 (ver `CLAUDE_PROGRESS.md` para el setup usado en
-  la PC de escritorio, incluido `scripts/start-db.ps1`).
+- Docker Desktop corriendo — para Postgres, y desde la Fase 3 también para
+  ejecutar las automatizaciones (cada corrida es un container). Ya no es
+  opcional como en fases anteriores.
+  Si no tenés Docker Desktop disponible para Postgres, una alternativa es
+  Postgres corriendo dentro de WSL2 (ver `CLAUDE_PROGRESS.md` para el setup
+  usado en la PC de escritorio, incluido `scripts/start-db.ps1`) — pero la
+  ejecución de automatizaciones sí necesita Docker Desktop en sí.
 
 ### 2. Levantar Postgres
 
@@ -95,21 +111,29 @@ Si PowerShell bloquea la activación con un error de ejecución de scripts:
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
-Después creá un archivo `.env` en la raíz con:
+Después copiá `.env.example` a `.env` (`copy .env.example .env`) y generá tu propia clave de encriptación:
 
-```
-DATABASE_URL=postgresql+psycopg://automation_user:automation_pass@localhost:5432/automation_db
-TEST_DATABASE_URL=postgresql+psycopg://automation_user:automation_pass@localhost:5432/automation_test_db
-EXECUTION_TIMEOUT_SECONDS=30
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 4. Migraciones
+Pegá el resultado en `SECRET_KEY` dentro de `.env`. Nunca reuses una clave de ejemplo ni la compartas — es la que encripta los secretos de las automatizaciones.
+
+### 4. Construir la imagen del sandbox
+
+```powershell
+docker build -f docker/sandbox.Dockerfile -t automation-sandbox:latest docker
+```
+
+Se construye una sola vez (no hace falta reconstruirla salvo que cambie `docker/sandbox.Dockerfile`). Cada ejecución de una automatización arranca un container nuevo a partir de esta imagen.
+
+### 5. Migraciones
 
 ```powershell
 alembic upgrade head
 ```
 
-### 5. Levantar la API
+### 6. Levantar la API
 
 ```powershell
 uvicorn app.main:app --reload
@@ -147,6 +171,11 @@ curl -X POST http://localhost:8000/automations/1/run
 
 # Ver el historial de ejecuciones
 curl http://localhost:8000/automations/1/executions
+
+# Una automatización con un secreto, que lo lee como env var
+curl -X POST http://localhost:8000/automations `
+  -H "Content-Type: application/json" `
+  -d '{\"user_id\": 1, \"name\": \"Con secreto\", \"cron_expression\": \"*/5 * * * *\", \"secrets\": {\"API_KEY\": \"abc123\"}, \"script_code\": \"import os; print(os.environ[\\\"API_KEY\\\"])\"}'
 ```
 
 O directamente desde `http://localhost:8000/docs`, con el botón "Try it out" en cada endpoint.
@@ -155,7 +184,7 @@ O directamente desde `http://localhost:8000/docs`, con el botón "Try it out" en
 
 **User**: `id`, `email` (único), `created_at`. Mínimo a propósito — sin campos de auth hasta la Fase 4.
 
-**Automation**: `id`, `user_id` (FK a `users`), `name`, `script_code` (texto), `cron_expression`, `is_active`, `created_at`, `updated_at`.
+**Automation**: `id`, `user_id` (FK a `users`), `name`, `script_code` (texto), `cron_expression`, `is_active`, `secrets_encrypted` (binario, nunca expuesto por la API), `created_at`, `updated_at`.
 
 **Execution**: `id`, `automation_id` (FK a `automations`), `status` (`pending` / `running` / `success` / `failed`), `output_log`, `started_at`, `finished_at`.
 

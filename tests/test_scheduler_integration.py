@@ -53,12 +53,20 @@ def test_automation_with_minute_cron_runs_on_its_own():
             deadline = time.monotonic() + 65
             execution = None
             while time.monotonic() < deadline:
+                # expire_all() fuerza a releer de la DB en cada vuelta --
+                # sin esto, la identity map de SQLAlchemy puede devolver el
+                # mismo objeto Python ya cacheado en RUNNING de una vuelta
+                # anterior, en vez de la fila actualizada.
+                db.expire_all()
                 execution = (
                     db.query(Execution)
                     .filter(Execution.automation_id == automation_id)
                     .first()
                 )
-                if execution is not None:
+                # No alcanza con que exista: la Execution se crea en RUNNING
+                # ANTES de que el container termine (ver executor.py), así
+                # que hay que esperar a que llegue a un estado final.
+                if execution is not None and execution.status != ExecutionStatus.RUNNING:
                     break
                 time.sleep(2)
 
