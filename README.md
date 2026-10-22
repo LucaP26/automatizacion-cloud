@@ -81,6 +81,12 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **El webhook de notificaciones es opt-in, no un requisito.** Si `NOTIFICATION_WEBHOOK_URL` no está configurada, `notify_execution_failed` no hace nada — ni rompe el arranque de la app ni la ejecución. Y si el webhook configurado falla (caído, timeout), se loguea y se sigue: una notificación que no llegó no debería hacer que la ejecución en sí se reporte como un error distinto al que realmente pasó.
 
+**Los secretos se redactan del log antes de mandarlo al webhook.** El `output_log` puede contener un secreto si el script lo imprimió (es el patrón que esta misma documentación sugiere para probar que un secreto llegó bien al container). Antes de armar el mensaje para Slack, se reemplaza cualquier aparición literal del *valor* de cada secreto por un placeholder. No es perfecto — si el script lo transforma antes de imprimirlo (base64, por ejemplo) no lo detecta — pero cubre el caso común sin tener que parsear o interpretar el log.
+
+**Trade-off consciente: la notificación es síncrona, puede agregar hasta 5s a una corrida manual fallida.** `POST /automations/{id}/run` espera a que `requests.post(...)` al webhook responda (o haga timeout) antes de devolver la respuesta HTTP. La alternativa — dispararla en un hilo de fondo, fire-and-forget — evita ese bloqueo, pero le mete no-determinismo a los tests (verificar "se llamó al webhook" deja de ser instantáneo) a cambio de resolver un caso de borde: solo importa cuando la corrida es manual, falló, y el webhook está lento o caído. Mismo criterio que ya se aplicó con el scheduler (sin Celery): simplicidad por sobre la pieza de infraestructura que resolvería el caso de borde.
+
+**Login corre el hash de verificación aunque el email no exista.** `bcrypt.checkpw` es deliberadamente lento (ese es el punto de bcrypt). Si solo se llamara cuando el usuario existe, un email no registrado respondería mucho más rápido que uno registrado con la contraseña incorrecta — una diferencia de tiempo medible que le permite a quien ataca enumerar qué emails están registrados, aunque el cuerpo de la respuesta sea siempre el mismo 401 genérico. Por eso se compara igual contra un hash fijo (`_DUMMY_HASH`) cuando el email no existe: el costo de bcrypt se paga en los dos casos.
+
 ## Cómo levantarlo en local
 
 > Nota: si estás retomando este proyecto en una máquina distinta a la última

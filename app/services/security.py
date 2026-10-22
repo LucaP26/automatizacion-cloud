@@ -19,7 +19,15 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed_password: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except ValueError:
+        # hashed_password no es un hash bcrypt valido (por ejemplo, el
+        # placeholder '' que la migracion le puso a usuarios de fases
+        # anteriores a la 4, que nunca tuvieron password real). No puede
+        # ser la contraseña correcta -- un ValueError acá nunca debería
+        # convertirse en un 500, es simplemente "no coincide".
+        return False
 
 
 def create_access_token(user_id: int) -> str:

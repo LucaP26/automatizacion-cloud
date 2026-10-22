@@ -28,6 +28,37 @@ def test_register_rejects_short_password(client):
     assert response.status_code == 422
 
 
+def test_register_rejects_password_over_72_utf8_bytes(client):
+    # "ñ" pesa 2 bytes en UTF-8: 72 caracteres de "ñ" son 144 bytes, mas
+    # de lo que bcrypt acepta. max_length en caracteres no alcanza para
+    # evitar esto -- tiene que medirse en bytes.
+    response = client.post(
+        "/auth/register",
+        json={"email": "larga@example.com", "password": "ñ" * 72},
+    )
+
+    assert response.status_code == 422
+
+
+def test_login_against_legacy_user_without_real_hash_fails_cleanly(client, db_session):
+    # Usuarios creados en fases anteriores a la 4 tienen hashed_password=''
+    # (placeholder de la migracion, ver 0a51fd085625). Intentar loguearse
+    # con ese usuario no debe explotar con un 500 -- bcrypt.checkpw tira
+    # ValueError con un hash que no es bcrypt valido, y eso tiene que
+    # traducirse a un 401 limpio, no a un error sin manejar.
+    from app.models import User
+
+    legacy_user = User(email="legacy@example.com", hashed_password="")
+    db_session.add(legacy_user)
+    db_session.commit()
+
+    response = client.post(
+        "/auth/login", data={"username": "legacy@example.com", "password": "cualquier-cosa"}
+    )
+
+    assert response.status_code == 401
+
+
 def test_login_with_correct_credentials_returns_token(client):
     client.post(
         "/auth/register", json={"email": "login@example.com", "password": "password123"}
@@ -53,6 +84,24 @@ def test_login_with_wrong_password_fails(client):
     )
 
     assert response.status_code == 401
+
+
+def test_login_with_unknown_email_still_runs_password_check(client):
+    # No alcanza con que devuelva 401 -- tiene que gastar el mismo tiempo
+    # (correr bcrypt.checkpw igual) que con un email que SI existe, para
+    # no filtrar por timing que ese email no esta registrado. Se verifica
+    # mockeando verify_password y confirmando que se llamo, en vez de
+    # medir tiempos reales (que seria un test lento y poco confiable).
+    from unittest.mock import patch
+
+    with patch("app.routers.auth.verify_password") as mock_verify:
+        mock_verify.return_value = False
+        client.post(
+            "/auth/login",
+            data={"username": "no-existe-de-verdad@example.com", "password": "lo-que-sea"},
+        )
+
+    mock_verify.assert_called_once()
 
 
 def test_login_with_unknown_email_fails(client):

@@ -1,14 +1,22 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    # bcrypt ignora/trunca silenciosamente cualquier byte despues del 72,
-    # asi que lo limitamos antes -- un error 422 claro es mejor que un
-    # hash que en secreto solo considera el primer pedazo de la password.
-    password: str = Field(min_length=8, max_length=72)
+    password: str = Field(min_length=8)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_byte_length(cls, value: str) -> str:
+        # bcrypt (>=4.0, la version que usamos) RECHAZA con ValueError una
+        # password de mas de 72 BYTES -- no caracteres. "ñ"*72 son 72
+        # caracteres pero 144 bytes en UTF-8, asi que un max_length=72 de
+        # Pydantic (que cuenta caracteres) no alcanza para evitar ese 500.
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("La contraseña no puede superar los 72 bytes")
+        return value
 
 
 class UserRead(BaseModel):

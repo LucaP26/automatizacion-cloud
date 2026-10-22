@@ -77,7 +77,9 @@ def run_automation_script(db: Session, automation: Automation) -> Execution:
     # si la corrida vino de un POST /run manual o del scheduler, sin
     # duplicar esta lógica en los dos lugares que llaman a esta función.
     if execution.status == ExecutionStatus.FAILED:
-        notify_execution_failed(automation, execution)
+        notify_execution_failed(
+            automation, execution, decrypt_secrets(automation.secrets_encrypted)
+        )
 
     return execution
 
