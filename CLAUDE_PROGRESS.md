@@ -23,6 +23,43 @@ de git.
 
 ---
 
+## 2026-10-14 — Laptop
+
+**Fase 3 (aislamiento) completa**, en la branch `fase-3-aislamiento`. Resumen
+para quien retome en la PC de escritorio:
+
+- **`executor.py` ahora usa Docker, no `subprocess`.** La firma de
+  `run_automation_script(db, automation)` no cambió -- router y scheduler
+  no se tocaron.
+- **Nueva imagen que hay que construir a mano una vez por máquina:**
+  `docker build -f docker/sandbox.Dockerfile -t automation-sandbox:latest docker`
+  Sin esto, cualquier ejecución falla con un mensaje claro ("no se encontró
+  la imagen..."), no con un crash críptico.
+- **`.env` nuevo necesita 3 variables** que antes no existían:
+  `SECRET_KEY` (clave Fernet, generar una propia -- ver `.env.example`),
+  `EXECUTION_MEMORY_LIMIT` (default `128m`), `EXECUTION_CPU_LIMIT` (default
+  `0.5`). Sin `SECRET_KEY` la app ni arranca (`Settings` la exige).
+- **Dependencias nuevas:** `docker==7.2.0`, `cryptography==50.0.2`. Se sacó
+  `croniter` (ya en la Fase 2, por si no habías hecho `pip install -r
+  requirements.txt` desde entonces).
+- **Migración nueva:** `secrets_encrypted` en `automations` (columna
+  binaria, nullable). `alembic upgrade head` la aplica.
+- **Hallazgo de plataforma, por si lo pisás en la PC de escritorio:** el
+  timeout de `container.wait()` del SDK de Docker sale como
+  `requests.exceptions.ConnectionError` en Windows (Docker Desktop, named
+  pipe), no `ReadTimeout` como en Linux/Mac -- `executor.py` ya atrapa los
+  dos, pero si portás esto a Linux algún día, confirmá que sigue andando.
+- Code review corrido sobre el diff antes de abrir el PR (ver abajo si hay
+  hallazgos agregados después de esta entrada).
+- Tests: 13 pasando (9 fase 1/2 + 3 nuevos de `test_sandbox.py` + el lento
+  del scheduler). Córrelos con Docker Desktop ya corriendo.
+
+**Pendiente, no bloqueante:** no se tocó la estrategia de "un container por
+ejecución" para pool de workers reutilizados -- quedó documentado en el
+README como decisión consciente, no como deuda.
+
+---
+
 ## 2026-09-11 — Laptop
 
 **Contexto:** Respuesta a la entrada de la PC de escritorio de más abajo — Luca

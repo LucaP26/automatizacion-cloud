@@ -6,6 +6,7 @@ from app.models.automation import Automation
 from app.models.execution import Execution
 from app.schemas.automation import AutomationCreate, AutomationRead, AutomationUpdate
 from app.schemas.execution import ExecutionRead
+from app.services.crypto import encrypt_secrets
 from app.services.executor import run_automation_script
 from app.services.scheduler import schedule_automation, unschedule_automation
 
@@ -21,7 +22,9 @@ def _get_automation_or_404(db: Session, automation_id: int) -> Automation:
 
 @router.post("", response_model=AutomationRead, status_code=status.HTTP_201_CREATED)
 def create_automation(payload: AutomationCreate, db: Session = Depends(get_db)) -> Automation:
-    automation = Automation(**payload.model_dump())
+    data = payload.model_dump()
+    secrets = data.pop("secrets")
+    automation = Automation(**data, secrets_encrypted=encrypt_secrets(secrets))
     db.add(automation)
     db.commit()
     db.refresh(automation)
@@ -46,6 +49,8 @@ def update_automation(
 ) -> Automation:
     automation = _get_automation_or_404(db, automation_id)
     updated_fields = payload.model_dump(exclude_unset=True)
+    if "secrets" in updated_fields:
+        automation.secrets_encrypted = encrypt_secrets(updated_fields.pop("secrets"))
     for key, value in updated_fields.items():
         setattr(automation, key, value)
     db.commit()
