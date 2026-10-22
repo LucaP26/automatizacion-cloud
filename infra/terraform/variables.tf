@@ -20,9 +20,9 @@ variable "ssh_public_key_path" {
 }
 
 variable "location" {
-  description = "Región de Azure. Azure for Students restringe regiones por policy: si el apply falla con RequestDisallowedByAzure, probar otra."
+  description = "Región de Azure. Azure for Students restringe regiones por policy (ver: az policy assignment list); si el apply falla con RequestDisallowedByAzure, probar otra de esa lista."
   type        = string
-  default     = "eastus"
+  default     = "chilecentral"
 }
 
 variable "project_name" {
@@ -32,9 +32,9 @@ variable "project_name" {
 }
 
 variable "vm_size" {
-  description = "Tamaño de la VM. Standard_B1s entra en las horas gratis de Azure for Students."
+  description = "Tamaño de la VM. B2ats_v2 (2 vCPU AMD, 1 GB RAM) es el reemplazo de B1s, que ya no se ofrece en las regiones de Azure for Students; ver disponibilidad con az vm list-skus --location <region>."
   type        = string
-  default     = "Standard_B1s"
+  default     = "Standard_B2ats_v2"
 }
 
 variable "admin_username" {

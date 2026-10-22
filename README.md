@@ -121,6 +121,8 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **Azure: una VM con compose, no Container Apps ni App Service.** El executor necesita un daemon de Docker para lanzar sandboxes, y los servicios PaaS de containers de Azure no exponen uno. Container Apps hubiera obligado a reescribir el executor contra Azure Container Instances (otro SDK, credenciales, ~30s de arranque por ejecución) y a pagar más. Con una VM, local y Azure corren el **mismo** `docker-compose.yml`: lo que pasa el smoke test en CI es lo que se despliega. El costo es que el sistema operativo queda a nuestro cargo (parches, reinicios), algo que un PaaS resolvería.
 
+**`Standard_B2ats_v2` en `chilecentral`, no `B1s` en `eastus`.** Azure for Students restringe por policy en qué regiones se puede desplegar (`az policy assignment list`), y `eastus` no está entre ellas. De las permitidas, ninguna ofrece la serie B v1 (`B1s`) para esta suscripción (`az vm list-skus --location <región>`). `B2ats_v2` es su reemplazo en la serie B v2: misma RAM (1 GB), 2 vCPU AMD x86 y soporte de disco Premium. `chilecentral` es la región permitida más cercana. Las dos cosas son variables de Terraform, así que cambiarlas no requiere tocar código.
+
 **Postgres en un container de la VM, no Azure Database for PostgreSQL.** No suma costo y `terraform destroy` se lleva todo. A cambio, no hay backups gestionados ni alta disponibilidad: si se borra la VM, se borran los datos. Para un portfolio es aceptable; con datos reales, lo primero a cambiar sería pasar a Flexible Server.
 
 **Los secretos de la app se generan en la VM, nunca pasan por Terraform.** La primera vez que arranca la VM, cloud-init genera `POSTGRES_PASSWORD`, `SECRET_KEY` y `JWT_SECRET_KEY` con `openssl`/`os.urandom` y los escribe en un `.env` con permisos `600`. Si se pasaran como variables de Terraform, quedarían en texto plano en el `terraform.tfstate`, porque `sensitive = true` solo los oculta del output de la consola, no del state. Si el `.env` ya existe, no se regenera: rotar `SECRET_KEY` dejaría ilegibles los secretos que ya están encriptados en la base.
@@ -253,7 +255,7 @@ terraform plan
 terraform apply
 ```
 
-`terraform apply` crea un resource group con una VNet, un NSG, una IP pública y una VM Ubuntu 24.04 (`Standard_B1s`, que entra en las horas gratis de Azure for Students). Al arrancar, cloud-init instala Docker, clona este repo, genera los secretos y corre `docker compose up -d --build`. El apply termina en unos 2 minutos, pero la API tarda unos 5 minutos más en quedar arriba, porque la VM está construyendo las imágenes. Para ver el progreso:
+`terraform apply` crea un resource group con una VNet, un NSG, una IP pública y una VM Ubuntu 24.04 (`Standard_B2ats_v2` en `chilecentral`; ver "Decisiones de la Fase 5" para el porqué). Al arrancar, cloud-init instala Docker, clona este repo, genera los secretos y corre `docker compose up -d --build`. El apply termina en unos 2 minutos, pero la API tarda unos 5 minutos más en quedar arriba, porque la VM está construyendo las imágenes. Para ver el progreso:
 
 ```powershell
 ssh azureuser@<public_ip>             # o: terraform output ssh_command
