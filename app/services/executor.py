@@ -12,6 +12,7 @@ from app.config import settings
 from app.models.automation import Automation
 from app.models.execution import Execution, ExecutionStatus
 from app.services.crypto import decrypt_secrets
+from app.services.notifier import notify_execution_failed
 
 SANDBOX_IMAGE = "automation-sandbox:latest"
 
@@ -71,6 +72,13 @@ def run_automation_script(db: Session, automation: Automation) -> Execution:
     execution.finished_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(execution)
+
+    # Se dispara desde el service, no desde el router: así notifica igual
+    # si la corrida vino de un POST /run manual o del scheduler, sin
+    # duplicar esta lógica en los dos lugares que llaman a esta función.
+    if execution.status == ExecutionStatus.FAILED:
+        notify_execution_failed(automation, execution)
+
     return execution
 
 

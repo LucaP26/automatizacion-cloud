@@ -2,15 +2,17 @@
 
 Plataforma web para registrar scripts de Python, programarlos con cron, ejecutarlos y ver el resultado de cada corrida. Proyecto de portfolio enfocado en backend + DevOps: arquitectura de API prolija, containerización con propósito y CI/CD real.
 
-## Estado actual: Fase 3 — Aislamiento
+## Estado actual: Fase 4 — Auth y notificaciones
 
-- CRUD de automatizaciones (`Automation`).
+- CRUD de automatizaciones (`Automation`), **scopeado por usuario**: cada uno ve, edita, borra y corre solo las suyas.
 - Las automatizaciones activas corren solas según su cron (scheduler con APScheduler), o manualmente vía `POST /automations/{id}/run`.
 - Historial de ejecuciones (`Execution`) con status, logs y timestamps.
-- **Cada ejecución corre dentro de un container Docker descartable**, no en el proceso de la API — con timeout, límites de memoria/CPU, y filesystem de solo lectura.
-- **Secretos (variables de entorno) por automatización, encriptados en la base**, inyectados al container solo en el momento de ejecutar — nunca en texto plano, nunca expuestos por la API.
+- Cada ejecución corre dentro de un container Docker descartable, con timeout, límites de memoria/CPU, y filesystem de solo lectura.
+- Secretos (variables de entorno) por automatización, encriptados en la base, inyectados al container solo en el momento de ejecutar.
+- **Autenticación con JWT**: `POST /auth/register` y `POST /auth/login`. Todos los endpoints de `/automations` requieren un token válido.
+- **Notificación por webhook** (p.ej. Slack) cuando una ejecución termina en `failed` — opcional, no-op si no está configurada.
 
-Fases siguientes (spec completa en `prompt_claude_code.md`): auth JWT + notificaciones, infraestructura con Docker Compose / Terraform / GitHub Actions.
+Fase siguiente (spec completa en `prompt_claude_code.md`): infraestructura con Docker Compose / Terraform / GitHub Actions.
 
 ## Arquitectura
 
@@ -31,7 +33,7 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 ### Decisiones de arquitectura
 
-**Modelos (`models/`) vs. schemas (`schemas/`), separados a propósito.** El modelo ORM define cómo se guardan los datos; el schema define el contrato JSON de la API. Son cosas que cambian por razones distintas: el día que `User` tenga `hashed_password` (Fase 4), ese campo no va a existir en `UserRead` — es estructuralmente imposible que se filtre en una respuesta, no depende de que alguien se acuerde de excluirlo a mano. Además, un objeto de SQLAlchemy ni siquiera es serializable a JSON directamente (tiene metadata interna del ORM, como `_sa_instance_state`) — el schema es el traductor obligatorio entre "objeto Python interno" y "JSON que viaja por HTTP", en los dos sentidos: valida lo que entra (por ejemplo, rechaza un cron inválido con 422 antes de tocar la base) y filtra lo que sale.
+**Modelos (`models/`) vs. schemas (`schemas/`), separados a propósito.** El modelo ORM define cómo se guardan los datos; el schema define el contrato JSON de la API. Son cosas que cambian por razones distintas: `User` tiene `hashed_password` desde la Fase 4, pero ese campo no existe en `UserRead` — es estructuralmente imposible que se filtre en una respuesta, no depende de que alguien se acuerde de excluirlo a mano. Además, un objeto de SQLAlchemy ni siquiera es serializable a JSON directamente (tiene metadata interna del ORM, como `_sa_instance_state`) — el schema es el traductor obligatorio entre "objeto Python interno" y "JSON que viaja por HTTP", en los dos sentidos: valida lo que entra (por ejemplo, rechaza un cron inválido con 422 antes de tocar la base) y filtra lo que sale.
 
 **`subprocess` en la Fase 1, Docker desde la Fase 3.** El objetivo de la Fase 1 era validar el flujo completo (registrar → ejecutar → ver resultado) con la menor cantidad de piezas móviles. `subprocess` corre el script en un proceso del sistema operativo separado del proceso de la API — más aislado que un `exec()` en el mismo intérprete, pero lejos de ser seguro para código arbitrario de terceros (mismo filesystem, mismos permisos, mismas dependencias que la API). El `timeout` ya era obligatorio desde esa fase (`EXECUTION_TIMEOUT_SECONDS`): sin él, un script con un loop infinito cuelga el request HTTP completo, porque la ejecución es síncrona y bloqueante. En la Fase 3 el mecanismo de ejecución cambió por completo (ver más abajo), pero **la firma de `run_automation_script(db, automation)` nunca se tocó** — ni el router ni el scheduler se enteraron del cambio, solo `executor.py`.
 
@@ -47,7 +49,7 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **Trade-off consciente: la red del container queda habilitada por default.** Muchas automatizaciones reales necesitan llamar a una API externa (el ejemplo que venimos usando: un reporte del clima). Deshabilitar la red por default rompería ese caso de uso legítimo. El aislamiento de esta fase se enfoca en filesystem, memoria, CPU y tiempo — no en red. Si en el futuro se necesitara bloquear red para automatizaciones específicas, `network_disabled=True` es un parámetro más a exponer por automatización, no un cambio de arquitectura.
 
-**Un `User` mínimo ya en Fase 1, sin password.** `Automation` necesita un `user_id` con integridad referencial real (foreign key), no un entero suelto sin garantías. Se creó una tabla `users` mínima (`id`, `email`, `created_at`) para tener esa FK desde el principio, sin agregar campos de auth (`hashed_password`) que todavía no tienen ningún endpoint que los use — eso llega recién en la Fase 4, con su propia migración.
+**Un `User` mínimo ya en Fase 1, completado en la Fase 4.** `Automation` necesita un `user_id` con integridad referencial real (foreign key), no un entero suelto sin garantías. Se creó una tabla `users` mínima (`id`, `email`, `created_at`) desde el principio, sin agregar campos de auth que todavía no tenían ningún endpoint que los usara. En la Fase 4 se le agregó `hashed_password` con su propia migración, en 3 pasos (nullable → rellenar filas existentes → restringir a `NOT NULL`) para no romper los usuarios de prueba que ya existían — el patrón correcto para agregar una columna obligatoria a una tabla con filas, sea en desarrollo o en producción.
 
 **Postgres desde el arranque, nunca SQLite.** El proyecto es un ejercicio de mostrar prácticas reales de backend/DevOps, y Postgres es lo que se termina desplegando en Azure (Fase 5). Usar SQLite en dev/test y Postgres en producción esconde diferencias de tipos y comportamiento (enums, timezones, constraints) que después aparecen como bugs sorpresa recién en producción. Los tests corren contra una base Postgres separada (`TEST_DATABASE_URL`), nunca contra la de desarrollo — cada test corre dentro de una transacción que se revierte (`rollback`) al terminar, así quedan aislados entre sí sin importar el orden en que corran.
 
@@ -64,6 +66,20 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 **Hallazgo de APScheduler que vale la pena documentar:** `scheduler.add_job(..., replace_existing=True)` no deduplica si se llama *antes* de `scheduler.start()` — antes de arrancar, los jobs quedan en una lista interna (`_pending_jobs`) que no aplica `replace_existing` entre sí misma, y al arrancar, duplicados sobreviven todos. Por eso en el `lifespan` de `main.py` el scheduler arranca *antes* de cargar los jobs, no después.
 
 **El scheduler usa la base real, no `get_db()`.** El job que dispara un cron corre en un hilo aparte, con su propia sesión (`SessionLocal` de `app.database` directo) — no pasa por la inyección de dependencias de FastAPI, así que `app.dependency_overrides` no lo alcanza en los tests. Por eso el test que verifica un cron disparando solo (`tests/test_scheduler_integration.py`) no usa las fixtures `client`/`db_session` de siempre: usa la base real configurada y limpia a mano lo que crea, en vez de depender del rollback automático del resto de la suite.
+
+**`bcrypt` en vez de `passlib`.** `passlib` es una capa de abstracción más amplia (soporta decenas de esquemas de hashing) que hace tiempo no recibe mantenimiento activo. `bcrypt` a secas es la librería específica para este único propósito, simple y probada — no hace falta la abstracción extra para un proyecto que solo necesita un esquema. Un detalle a tener en cuenta: bcrypt ignora cualquier byte de la contraseña después del byte 72, así que `UserCreate` valida `max_length=72` en el schema — un 422 claro es mejor que un hash que en secreto solo considera el primer pedazo de la contraseña.
+
+**`PyJWT` directo, con una clave separada de la de los secretos.** `JWT_SECRET_KEY` (para firmar tokens) es una clave distinta de `SECRET_KEY` (la Fernet que encripta los secretos de las automatizaciones, Fase 3) — son dos usos criptográficos distintos (firma/verificación vs. encriptación simétrica), y nunca conviene reusar una misma clave para propósitos distintos: si una se filtra, la otra sigue segura.
+
+**`OAuth2PasswordBearer` + `OAuth2PasswordRequestForm`, el patrón estándar de FastAPI.** `POST /auth/login` recibe `username`/`password` como form data (no JSON) — es el flujo "password" de OAuth2 que FastAPI espera para integrarse con el botón "Authorize" de `/docs`: pegás el token ahí una vez y Swagger UI lo manda solo en cada request de prueba siguiente. En este proyecto "username" es el email, no hay un campo de username separado.
+
+**404, no 403, cuando un usuario pide un recurso de otro.** `_get_owned_automation_or_404` filtra por `id` *y* por `user_id` en la misma query, y devuelve 404 tanto si el id no existe como si existe pero es de otro usuario. Un 403 ("no tenés permiso") confirmaría que el id existe, aunque sea de otro — información que no le corresponde a quien pregunta. Con 404 en los dos casos, no hay forma de distinguir "no existe" de "no es tuyo".
+
+**El `user_id` nunca lo manda el cliente.** En las fases anteriores, `AutomationCreate` pedía `user_id` en el body — cualquiera podía crear una automatización a nombre de otro con solo cambiar un número. Ahora `user_id` sale siempre de `current_user.id` (resuelto del JWT), y el schema ni siquiera tiene ese campo.
+
+**Las notificaciones se disparan desde `executor.py`, no desde el router.** Si el trigger estuviera en el router (en el endpoint `POST /run`), una ejecución disparada por el scheduler (un cron, no un request HTTP) nunca notificaría — habría que duplicar la lógica en dos lugares. Como ya quedó establecido desde la Fase 1 que `run_automation_script` es el único punto de entrada para "ejecutar y persistir el resultado" (lo llaman tanto el router como el scheduler), ahí es el único lugar donde hace falta agregar la notificación.
+
+**El webhook de notificaciones es opt-in, no un requisito.** Si `NOTIFICATION_WEBHOOK_URL` no está configurada, `notify_execution_failed` no hace nada — ni rompe el arranque de la app ni la ejecución. Y si el webhook configurado falla (caído, timeout), se loguea y se sigue: una notificación que no llegó no debería hacer que la ejecución en sí se reporte como un error distinto al que realmente pasó.
 
 ## Cómo levantarlo en local
 
@@ -119,6 +135,12 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Pegá el resultado en `SECRET_KEY` dentro de `.env`. Nunca reuses una clave de ejemplo ni la compartas — es la que encripta los secretos de las automatizaciones.
 
+Generá también una `JWT_SECRET_KEY` **distinta** (nunca la misma que `SECRET_KEY` — son dos usos criptográficos diferentes):
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
 ### 4. Construir la imagen del sandbox
 
 ```powershell
@@ -158,31 +180,41 @@ pytest tests/test_scheduler_integration.py -m slow
 ### Manualmente con curl
 
 ```powershell
-# Crear un usuario directo en la DB (todavía no hay endpoint, llega en Fase 4)
-docker exec automation-postgres psql -U automation_user -d automation_db -c "INSERT INTO users (email, created_at) VALUES ('demo@example.com', now());"
-
-# Crear una automatización
-curl -X POST http://localhost:8000/automations `
+# Registrarse
+curl -X POST http://localhost:8000/auth/register `
   -H "Content-Type: application/json" `
-  -d '{\"user_id\": 1, \"name\": \"Saludo\", \"script_code\": \"print(1+1)\", \"cron_expression\": \"*/5 * * * *\"}'
+  -d '{\"email\": \"demo@example.com\", \"password\": \"password123\"}'
+
+# Login (OAuth2 "password flow": form data, no JSON -- "username" es el email)
+curl -X POST http://localhost:8000/auth/login `
+  -d "username=demo@example.com&password=password123"
+# -> devuelve {"access_token": "...", "token_type": "bearer"}. Guardalo:
+$TOKEN = "el-access-token-de-la-respuesta-anterior"
+
+# Crear una automatización (ya no se manda user_id -- sale del token)
+curl -X POST http://localhost:8000/automations `
+  -H "Authorization: Bearer $TOKEN" `
+  -H "Content-Type: application/json" `
+  -d '{\"name\": \"Saludo\", \"script_code\": \"print(1+1)\", \"cron_expression\": \"*/5 * * * *\"}'
 
 # Ejecutarla manualmente (reemplazar 1 por el id devuelto arriba)
-curl -X POST http://localhost:8000/automations/1/run
+curl -X POST http://localhost:8000/automations/1/run -H "Authorization: Bearer $TOKEN"
 
 # Ver el historial de ejecuciones
-curl http://localhost:8000/automations/1/executions
+curl http://localhost:8000/automations/1/executions -H "Authorization: Bearer $TOKEN"
 
 # Una automatización con un secreto, que lo lee como env var
 curl -X POST http://localhost:8000/automations `
+  -H "Authorization: Bearer $TOKEN" `
   -H "Content-Type: application/json" `
-  -d '{\"user_id\": 1, \"name\": \"Con secreto\", \"cron_expression\": \"*/5 * * * *\", \"secrets\": {\"API_KEY\": \"abc123\"}, \"script_code\": \"import os; print(os.environ[\\\"API_KEY\\\"])\"}'
+  -d '{\"name\": \"Con secreto\", \"cron_expression\": \"*/5 * * * *\", \"secrets\": {\"API_KEY\": \"abc123\"}, \"script_code\": \"import os; print(os.environ[\\\"API_KEY\\\"])\"}'
 ```
 
-O directamente desde `http://localhost:8000/docs`, con el botón "Try it out" en cada endpoint.
+O directamente desde `http://localhost:8000/docs`: registrate y logueate con "Try it out" en `/auth/login`, copiá el `access_token`, y pegalo en el botón **Authorize** (arriba a la derecha) — Swagger UI lo manda solo en cada request siguiente, sin tener que copiarlo a mano en cada endpoint.
 
 ## Modelo de datos
 
-**User**: `id`, `email` (único), `created_at`. Mínimo a propósito — sin campos de auth hasta la Fase 4.
+**User**: `id`, `email` (único), `hashed_password`, `created_at`.
 
 **Automation**: `id`, `user_id` (FK a `users`), `name`, `script_code` (texto), `cron_expression`, `is_active`, `secrets_encrypted` (binario, nunca expuesto por la API), `created_at`, `updated_at`.
 
@@ -192,11 +224,13 @@ O directamente desde `http://localhost:8000/docs`, con el botón "Try it out" en
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `POST` | `/automations` | Crea una automatización |
-| `GET` | `/automations` | Lista todas |
-| `GET` | `/automations/{id}` | Obtiene una puntual |
-| `PATCH` | `/automations/{id}` | Actualiza parcialmente |
-| `DELETE` | `/automations/{id}` | Borra |
+| `POST` | `/auth/register` | Crea un usuario |
+| `POST` | `/auth/login` | Devuelve un JWT (form data: `username`=email, `password`) |
+| `POST` | `/automations` | Crea una automatización para el usuario autenticado — todos los de abajo requieren token |
+| `GET` | `/automations` | Lista solo las del usuario autenticado |
+| `GET` | `/automations/{id}` | Obtiene una puntual (404 si no existe o no es tuya) |
+| `PATCH` | `/automations/{id}` | Actualiza parcialmente (ídem) |
+| `DELETE` | `/automations/{id}` | Borra (ídem) |
 | `POST` | `/automations/{id}/run` | Corre el script ahora mismo (síncrono) y devuelve la `Execution` resultante |
 | `GET` | `/automations/{id}/executions` | Historial de ejecuciones de una automatización |
 | `GET` | `/automations/{id}/executions/{execution_id}` | Una ejecución puntual |

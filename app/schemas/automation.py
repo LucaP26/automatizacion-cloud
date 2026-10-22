@@ -59,7 +59,10 @@ class AutomationBase(BaseModel):
 
 
 class AutomationCreate(AutomationBase):
-    user_id: int
+    # No lleva user_id: el dueño es siempre el usuario autenticado
+    # (current_user.id en el router), nunca un valor que mande el cliente
+    # -- si no, cualquiera podría crear automatizaciones a nombre de otro
+    # usuario con solo cambiar un número en el body.
     # Env vars de la automatizacion (p.ej. API keys). Se encriptan antes de
     # guardarse (ver crypto.py) y nunca viajan de vuelta en una respuesta --
     # por eso vive solo en Create/Update, no en AutomationBase/Read.

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import SessionLocal
-from app.routers import automations
+from app.routers import auth, automations
 from app.services.scheduler import load_scheduled_automations, start_scheduler, stop_scheduler
 
 
@@ -28,6 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Automation Manager", version="0.1.0", lifespan=lifespan)
 
+app.include_router(auth.router)
 app.include_router(automations.router)
 
 
