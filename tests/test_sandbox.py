@@ -1,32 +1,21 @@
 import tempfile
 from pathlib import Path
 
-
-def _automation_payload(user_id: int, **overrides):
-    payload = {
-        "user_id": user_id,
-        "name": "Sandbox test",
-        "script_code": "print('hola')",
-        "cron_expression": "0 7 * * *",
-    }
-    payload.update(overrides)
-    return payload
+from tests.conftest import automation_payload as _automation_payload
 
 
-def test_reserved_env_var_names_are_rejected(client, test_user):
-    payload = _automation_payload(test_user.id, secrets={"PATH": "/algo/raro"})
+def test_reserved_env_var_names_are_rejected(client, auth_headers):
+    payload = _automation_payload(secrets={"PATH": "/algo/raro"})
 
-    response = client.post("/automations", json=payload)
+    response = client.post("/automations", json=payload, headers=auth_headers)
 
     assert response.status_code == 422
 
 
-def test_secrets_never_appear_in_the_api_response(client, test_user):
-    payload = _automation_payload(
-        test_user.id, secrets={"API_KEY": "super-secreta-no-deberia-salir"}
-    )
+def test_secrets_never_appear_in_the_api_response(client, auth_headers):
+    payload = _automation_payload(secrets={"API_KEY": "super-secreta-no-deberia-salir"})
 
-    response = client.post("/automations", json=payload)
+    response = client.post("/automations", json=payload, headers=auth_headers)
     body = response.json()
 
     assert response.status_code == 201
@@ -34,21 +23,21 @@ def test_secrets_never_appear_in_the_api_response(client, test_user):
     assert "secrets_encrypted" not in body
     assert "super-secreta-no-deberia-salir" not in response.text
 
-    get_response = client.get(f"/automations/{body['id']}")
+    get_response = client.get(f"/automations/{body['id']}", headers=auth_headers)
     assert "super-secreta-no-deberia-salir" not in get_response.text
 
 
-def test_secrets_are_injected_as_env_vars_in_the_container(client, test_user):
+def test_secrets_are_injected_as_env_vars_in_the_container(client, auth_headers):
     created = client.post(
         "/automations",
         json=_automation_payload(
-            test_user.id,
             script_code="import os; print(os.environ.get('MY_SECRET', 'NO-LLEGO'))",
             secrets={"MY_SECRET": "valor-secreto-123"},
         ),
+        headers=auth_headers,
     ).json()
 
-    response = client.post(f"/automations/{created['id']}/run")
+    response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.status_code == 201
     body = response.json()
@@ -56,7 +45,7 @@ def test_secrets_are_injected_as_env_vars_in_the_container(client, test_user):
     assert "valor-secreto-123" in body["output_log"]
 
 
-def test_script_cannot_access_unmounted_host_files(client, test_user):
+def test_script_cannot_access_unmounted_host_files(client, auth_headers):
     with tempfile.TemporaryDirectory() as host_secret_dir:
         host_secret_path = Path(host_secret_dir) / "secreto_del_host.txt"
         host_secret_path.write_text("contenido-secreto-del-host", encoding="utf-8")
@@ -71,17 +60,18 @@ def test_script_cannot_access_unmounted_host_files(client, test_user):
 
         created = client.post(
             "/automations",
-            json=_automation_payload(test_user.id, script_code=script),
+            json=_automation_payload(script_code=script),
+            headers=auth_headers,
         ).json()
 
-        response = client.post(f"/automations/{created['id']}/run")
+        response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
         body = response.json()
         assert "contenido-secreto-del-host" not in body["output_log"]
         assert "no se pudo leer" in body["output_log"]
 
 
-def test_script_cannot_write_to_its_own_mounted_script_file(client, test_user):
+def test_script_cannot_write_to_its_own_mounted_script_file(client, auth_headers):
     # A diferencia del test anterior (que prueba que no ve archivos del
     # host que nunca se montaron), este prueba especificamente el flag
     # read_only=True: el propio archivo que SI esta montado (/sandbox/script.py)
@@ -96,10 +86,11 @@ def test_script_cannot_write_to_its_own_mounted_script_file(client, test_user):
 
     created = client.post(
         "/automations",
-        json=_automation_payload(test_user.id, script_code=script),
+        json=_automation_payload(script_code=script),
+        headers=auth_headers,
     ).json()
 
-    response = client.post(f"/automations/{created['id']}/run")
+    response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     body = response.json()
     assert "ESCRIBIO" not in body["output_log"]

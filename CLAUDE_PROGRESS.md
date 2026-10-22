@@ -23,6 +23,51 @@ de git.
 
 ---
 
+## 2026-10-22 — Laptop
+
+**Fase 4 (auth y notificaciones) completa**, en la branch `fase-4-auth`.
+Resumen para quien retome en la PC de escritorio:
+
+- **`User.hashed_password` ahora es `NOT NULL`.** La migración lo agrega
+  en 3 pasos (nullable -> rellenar con placeholder -> restringir) para no
+  romper usuarios de prueba viejos -- `alembic upgrade head` la aplica
+  sola, no hace falta tocar datos a mano.
+- **`.env` nuevo necesita 4 variables mas:** `JWT_SECRET_KEY` (generar
+  propia, **distinta** de `SECRET_KEY` -- ver `.env.example`),
+  `JWT_ALGORITHM` (default `HS256`), `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`
+  (default `30`), `NOTIFICATION_WEBHOOK_URL` (opcional, vacío = no-op).
+  Sin `JWT_SECRET_KEY` la app ni arranca.
+- **`AutomationCreate` ya NO tiene `user_id`.** Si tenías algún script o
+  colección de Postman armada a mano con el `user_id` en el body, ya no
+  hace falta (y si lo mandás, Pydantic lo ignora silenciosamente -- no
+  rompe, pero tampoco hace nada).
+- **Todos los endpoints de `/automations` requieren
+  `Authorization: Bearer <token>`** (sacado de `POST /auth/login`). Antes
+  de probar nada a mano, `POST /auth/register` + `POST /auth/login`.
+- **Dependencias nuevas:** `bcrypt==5.0.0`, `pyjwt==2.15.1`,
+  `email-validator==2.3.0`, `python-multipart==0.0.32` (lo pide
+  `OAuth2PasswordRequestForm` para parsear el form del login),
+  `requests==2.34.2` (ya venía transitiva via `docker`, ahora declarada
+  directa).
+- Se instaló `python-multipart` sobre la marcha porque `OAuth2PasswordRequestForm`
+  lo necesita y no es dependencia de `fastapi` ni de `uvicorn[standard]`.
+- Tests: 33 pasando (14 de fases anteriores + 14 de `test_auth.py` + 3 de
+  `test_notifier.py`, más el lento del scheduler). `test_scheduler_integration.py`
+  tambien se actualizó (el `User` que crea ahora necesita `hashed_password`,
+  y el POST a `/automations` ahora lleva el header de auth).
+- Code review corrido antes de abrir el PR (ver entradas de commits para
+  el detalle de hallazgos si se agregaron después de esta nota).
+
+**Nota de entorno de esta sesión, no del código:** a mitad de la Fase 4 la
+laptop se quedó con ~500MB de RAM libre (varias ventanas de VSCode, dos
+sesiones de `claude` corriendo, Discord, Chrome) y varios comandos
+tiraron `MemoryError` en lugares tan básicos como importar `re`/`json` de
+la stdlib -- nada que ver con el código del proyecto. Se resolvió cerrando
+aplicaciones. Si esto se repite en la PC de escritorio, cerrar programas
+antes de asumir que hay un bug.
+
+---
+
 ## 2026-10-14 — Laptop
 
 **Fase 3 (aislamiento) completa**, en la branch `fase-3-aislamiento`. Resumen

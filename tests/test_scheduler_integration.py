@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal
 from app.main import app
 from app.models import Automation, Execution, ExecutionStatus, User
+from app.services.security import create_access_token, hash_password
 
 pytestmark = pytest.mark.slow
 
@@ -30,10 +31,15 @@ def test_automation_with_minute_cron_runs_on_its_own():
     user = db.query(User).first()
     created_user = user is None
     if created_user:
-        user = User(email="scheduler-integration-test@example.com")
+        user = User(
+            email="scheduler-integration-test@example.com",
+            hashed_password=hash_password("password123"),
+        )
         db.add(user)
         db.commit()
         db.refresh(user)
+
+    auth_headers = {"Authorization": f"Bearer {create_access_token(user.id)}"}
 
     automation_id = None
     try:
@@ -41,11 +47,11 @@ def test_automation_with_minute_cron_runs_on_its_own():
             response = client.post(
                 "/automations",
                 json={
-                    "user_id": user.id,
                     "name": "Scheduler integration test",
                     "script_code": "print('corrida automatica')",
                     "cron_expression": "* * * * *",
                 },
+                headers=auth_headers,
             )
             assert response.status_code == 201
             automation_id = response.json()["id"]

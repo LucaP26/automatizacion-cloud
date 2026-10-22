@@ -12,6 +12,7 @@ from app.config import settings
 from app.models.automation import Automation
 from app.models.execution import Execution, ExecutionStatus
 from app.services.crypto import decrypt_secrets
+from app.services.notifier import notify_execution_failed
 
 SANDBOX_IMAGE = "automation-sandbox:latest"
 
@@ -58,8 +59,24 @@ def run_automation_script(db: Session, automation: Automation) -> Execution:
     db.commit()
     db.refresh(execution)
 
+    # Se desencripta UNA sola vez, acá, dentro de la red de seguridad de
+    # abajo -- no en _run_in_sandbox. Tres motivos, todos encontrados en
+    # una revisión posterior: (1) si decrypt_secrets explota (SECRET_KEY
+    # rotada, blob corrupto), tiene que caer en el except de abajo como
+    # cualquier otro fallo, no escapar sin control después de que la
+    # Execution ya se guardó como FAILED; (2) desencriptar dos veces (una
+    # para el container, otra para la notificación) es trabajo redundante;
+    # (3) si alguien edita los secretos de la automatización MIENTRAS el
+    # container está corriendo, una segunda lectura tardía de
+    # `automation.secrets_encrypted` (después del commit, con el objeto
+    # expirado) puede traer el valor NUEVO -- y la redacción de la
+    # notificación fallaría en tapar el secreto VIEJO que de verdad se
+    # imprimió en el log. Un solo dict, calculado una sola vez, usado para
+    # las dos cosas, evita los tres problemas.
+    secrets: dict[str, str] = {}
     try:
-        _run_in_sandbox(execution, automation)
+        secrets = decrypt_secrets(automation.secrets_encrypted)
+        _run_in_sandbox(execution, automation, secrets)
     except Exception as exc:
         # Red de seguridad: sea lo que sea (daemon caído, SECRET_KEY
         # inválida, lo que no se nos haya ocurrido), la Execution nunca debe
@@ -71,10 +88,19 @@ def run_automation_script(db: Session, automation: Automation) -> Execution:
     execution.finished_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(execution)
+
+    # Se dispara desde el service, no desde el router: así notifica igual
+    # si la corrida vino de un POST /run manual o del scheduler, sin
+    # duplicar esta lógica en los dos lugares que llaman a esta función.
+    if execution.status == ExecutionStatus.FAILED:
+        notify_execution_failed(automation, execution, secrets)
+
     return execution
 
 
-def _run_in_sandbox(execution: Execution, automation: Automation) -> None:
+def _run_in_sandbox(
+    execution: Execution, automation: Automation, secrets: dict[str, str]
+) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         script_path = Path(tmp_dir) / "script.py"
         script_path.write_text(automation.script_code, encoding="utf-8")
@@ -97,7 +123,7 @@ def _run_in_sandbox(execution: Execution, automation: Automation) -> None:
                 SANDBOX_IMAGE,
                 command=["/sandbox/script.py"],
                 volumes={tmp_dir: {"bind": "/sandbox", "mode": "ro"}},
-                environment=decrypt_secrets(automation.secrets_encrypted),
+                environment=secrets,
                 read_only=True,
                 tmpfs={"/tmp": "rw,size=16m"},
                 mem_limit=settings.execution_memory_limit,
