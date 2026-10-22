@@ -1,16 +1,7 @@
 from unittest.mock import patch
 
 from app.config import settings
-
-
-def _automation_payload(**overrides):
-    payload = {
-        "name": "Notifier test",
-        "script_code": "print(1)",
-        "cron_expression": "0 7 * * *",
-    }
-    payload.update(overrides)
-    return payload
+from tests.conftest import automation_payload as _automation_payload
 
 
 def test_notifies_webhook_on_failed_execution(client, auth_headers, monkeypatch):
@@ -22,7 +13,7 @@ def test_notifies_webhook_on_failed_execution(client, auth_headers, monkeypatch)
         headers=auth_headers,
     ).json()
 
-    with patch("app.services.notifier.requests.post") as mock_post:
+    with patch("app.services.notifier.httpx.post") as mock_post:
         response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.json()["status"] == "failed"
@@ -39,7 +30,7 @@ def test_does_not_notify_on_successful_execution(client, auth_headers, monkeypat
         "/automations", json=_automation_payload(), headers=auth_headers
     ).json()
 
-    with patch("app.services.notifier.requests.post") as mock_post:
+    with patch("app.services.notifier.httpx.post") as mock_post:
         response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.json()["status"] == "success"
@@ -60,7 +51,7 @@ def test_secret_values_are_redacted_before_notifying(client, auth_headers, monke
         headers=auth_headers,
     ).json()
 
-    with patch("app.services.notifier.requests.post") as mock_post:
+    with patch("app.services.notifier.httpx.post") as mock_post:
         response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.json()["status"] == "failed"
@@ -81,7 +72,7 @@ def test_does_not_notify_when_webhook_not_configured(client, auth_headers, monke
         headers=auth_headers,
     ).json()
 
-    with patch("app.services.notifier.requests.post") as mock_post:
+    with patch("app.services.notifier.httpx.post") as mock_post:
         response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.json()["status"] == "failed"

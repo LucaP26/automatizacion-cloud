@@ -1,3 +1,8 @@
+import pytest
+
+from tests.conftest import automation_payload
+
+
 def test_register_new_user(client):
     response = client.post(
         "/auth/register", json={"email": "nuevo@example.com", "password": "password123"}
@@ -141,86 +146,38 @@ def test_full_register_then_login_then_use_token_flow(client):
     assert response.json() == []
 
 
-def test_user_cannot_see_another_users_automation(client, auth_headers, other_user_auth_headers):
-    created = client.post(
-        "/automations",
-        json={
-            "name": "De otro usuario",
-            "script_code": "print(1)",
-            "cron_expression": "0 7 * * *",
-        },
-        headers=other_user_auth_headers,
-    ).json()
-
-    response = client.get(f"/automations/{created['id']}", headers=auth_headers)
-
-    assert response.status_code == 404
-
-
-def test_user_cannot_update_another_users_automation(
-    client, auth_headers, other_user_auth_headers
+@pytest.mark.parametrize(
+    "method,path_suffix",
+    [("get", ""), ("patch", ""), ("delete", ""), ("post", "/run")],
+    ids=["see", "update", "delete", "run"],
+)
+def test_user_cannot_act_on_another_users_automation(
+    client, auth_headers, other_user_auth_headers, method, path_suffix
 ):
+    # Un solo test parametrizado en vez de 4 copias casi idénticas -- las
+    # cuatro verifican la misma invariante (404 al tocar lo de otro
+    # usuario), difieren solo en el verbo/ruta.
     created = client.post(
         "/automations",
-        json={
-            "name": "De otro usuario",
-            "script_code": "print(1)",
-            "cron_expression": "0 7 * * *",
-        },
+        json=automation_payload(name="De otro usuario"),
         headers=other_user_auth_headers,
     ).json()
 
-    response = client.patch(
-        f"/automations/{created['id']}", json={"is_active": False}, headers=auth_headers
+    kwargs = {"headers": auth_headers}
+    if method == "patch":
+        kwargs["json"] = {"is_active": False}
+
+    response = getattr(client, method)(
+        f"/automations/{created['id']}{path_suffix}", **kwargs
     )
-
-    assert response.status_code == 404
-
-
-def test_user_cannot_delete_another_users_automation(
-    client, auth_headers, other_user_auth_headers
-):
-    created = client.post(
-        "/automations",
-        json={
-            "name": "De otro usuario",
-            "script_code": "print(1)",
-            "cron_expression": "0 7 * * *",
-        },
-        headers=other_user_auth_headers,
-    ).json()
-
-    response = client.delete(f"/automations/{created['id']}", headers=auth_headers)
-
-    assert response.status_code == 404
-
-
-def test_user_cannot_run_another_users_automation(client, auth_headers, other_user_auth_headers):
-    created = client.post(
-        "/automations",
-        json={
-            "name": "De otro usuario",
-            "script_code": "print(1)",
-            "cron_expression": "0 7 * * *",
-        },
-        headers=other_user_auth_headers,
-    ).json()
-
-    response = client.post(f"/automations/{created['id']}/run", headers=auth_headers)
 
     assert response.status_code == 404
 
 
 def test_list_automations_only_shows_own(client, auth_headers, other_user_auth_headers):
+    client.post("/automations", json=automation_payload(name="Mia"), headers=auth_headers)
     client.post(
-        "/automations",
-        json={"name": "Mia", "script_code": "print(1)", "cron_expression": "0 7 * * *"},
-        headers=auth_headers,
-    )
-    client.post(
-        "/automations",
-        json={"name": "De otro", "script_code": "print(1)", "cron_expression": "0 7 * * *"},
-        headers=other_user_auth_headers,
+        "/automations", json=automation_payload(name="De otro"), headers=other_user_auth_headers
     )
 
     response = client.get("/automations", headers=auth_headers)

@@ -1,6 +1,6 @@
 import logging
 
-import requests
+import httpx
 
 from app.config import settings
 from app.models.automation import Automation
@@ -43,8 +43,8 @@ def notify_execution_failed(
         )
     }
     try:
-        requests.post(settings.notification_webhook_url, json=payload, timeout=5)
-    except requests.RequestException:
+        httpx.post(settings.notification_webhook_url, json=payload, timeout=5)
+    except httpx.HTTPError:
         logger.exception(
             "No se pudo enviar la notificación de fallo para automation_id=%s",
             automation.id,

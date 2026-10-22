@@ -75,3 +75,15 @@ def auth_headers(test_user):
 def other_user_auth_headers(other_user):
     token = create_access_token(other_user.id)
     return {"Authorization": f"Bearer {token}"}
+
+
+def automation_payload(**overrides):
+    # Compartido entre test_automation.py, test_sandbox.py, test_notifier.py
+    # y test_auth.py -- antes cada archivo tenía su propia copia de esto.
+    payload = {
+        "name": "Test Automation",
+        "script_code": "print('Hello, World!')",
+        "cron_expression": "0 7 * * *",
+    }
+    payload.update(overrides)
+    return payload

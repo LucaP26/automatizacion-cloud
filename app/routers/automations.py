@@ -15,14 +15,18 @@ from app.services.scheduler import schedule_automation, unschedule_automation
 router = APIRouter(prefix="/automations", tags=["automations"])
 
 
-def _get_owned_automation_or_404(db: Session, automation_id: int, owner_id: int) -> Automation:
+def _get_owned_automation_or_404(
+    db: Session, automation_id: int, current_user: User
+) -> Automation:
     # Filtra por id Y por dueño en la misma query, y devuelve 404 en
     # cualquiera de los dos casos (no existe, o existe pero es de otro
     # usuario) -- nunca un 403 que confirmaría que el id existe. Así, un
     # usuario no puede ni enterarse de si el id de otro existe o no.
+    # Recibe el User completo (no solo su id) para que cada call site pase
+    # el objeto que ya tiene a mano, sin tener que acordarse de ".id".
     automation = (
         db.query(Automation)
-        .filter(Automation.id == automation_id, Automation.user_id == owner_id)
+        .filter(Automation.id == automation_id, Automation.user_id == current_user.id)
         .first()
     )
     if automation is None:
@@ -62,7 +66,7 @@ def get_automation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Automation:
-    return _get_owned_automation_or_404(db, automation_id, current_user.id)
+    return _get_owned_automation_or_404(db, automation_id, current_user)
 
 
 @router.patch("/{automation_id}", response_model=AutomationRead)
@@ -72,7 +76,7 @@ def update_automation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Automation:
-    automation = _get_owned_automation_or_404(db, automation_id, current_user.id)
+    automation = _get_owned_automation_or_404(db, automation_id, current_user)
     updated_fields = payload.model_dump(exclude_unset=True)
     if "secrets" in updated_fields:
         automation.secrets_encrypted = encrypt_secrets(updated_fields.pop("secrets"))
@@ -94,7 +98,7 @@ def delete_automation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> None:
-    automation = _get_owned_automation_or_404(db, automation_id, current_user.id)
+    automation = _get_owned_automation_or_404(db, automation_id, current_user)
     db.delete(automation)
     db.commit()
     unschedule_automation(automation_id)
@@ -107,7 +111,7 @@ def run_automation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Execution:
-    automation = _get_owned_automation_or_404(db, automation_id, current_user.id)
+    automation = _get_owned_automation_or_404(db, automation_id, current_user)
     return run_automation_script(db, automation)
 
 
@@ -117,7 +121,7 @@ def get_automation_executions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[Execution]:
-    automation = _get_owned_automation_or_404(db, automation_id, current_user.id)
+    automation = _get_owned_automation_or_404(db, automation_id, current_user)
     return automation.executions
 
 
@@ -128,8 +132,14 @@ def get_automation_execution(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Execution:
-    _get_owned_automation_or_404(db, automation_id, current_user.id)
-    execution = db.get(Execution, execution_id)
-    if execution is None or execution.automation_id != automation_id:
+    _get_owned_automation_or_404(db, automation_id, current_user)
+    # Mismo estilo que _get_owned_automation_or_404: filtrar por los dos
+    # campos en la query, en vez de traer por PK y comparar en Python.
+    execution = (
+        db.query(Execution)
+        .filter(Execution.id == execution_id, Execution.automation_id == automation_id)
+        .first()
+    )
+    if execution is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Execution not found")
     return execution

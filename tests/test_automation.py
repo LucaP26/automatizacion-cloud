@@ -1,11 +1,4 @@
-def _automation_payload(**overrides):
-    payload = {
-        "name": "Test Automation",
-        "script_code": "print('Hello, World!')",
-        "cron_expression": "0 7 * * *",
-    }
-    payload.update(overrides)
-    return payload
+from tests.conftest import automation_payload as _automation_payload
 
 
 def test_create_automation(client, auth_headers):

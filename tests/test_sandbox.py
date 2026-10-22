@@ -1,15 +1,7 @@
 import tempfile
 from pathlib import Path
 
-
-def _automation_payload(**overrides):
-    payload = {
-        "name": "Sandbox test",
-        "script_code": "print('hola')",
-        "cron_expression": "0 7 * * *",
-    }
-    payload.update(overrides)
-    return payload
+from tests.conftest import automation_payload as _automation_payload
 
 
 def test_reserved_env_var_names_are_rejected(client, auth_headers):
