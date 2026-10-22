@@ -1,0 +1,50 @@
+#cloud-config
+# Bootstrap de la VM. Es un template de Terraform: $${...} es interpolación
+# de Terraform, por eso el script de bash de abajo usa $VAR y $(...), nunca
+# llaves, para sus propias variables.
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+
+# B1s tiene 1 GB de RAM: Postgres + API + worker + un sandbox de 128 MB
+# entran, pero el build de las imágenes y algún pico pueden no entrar. Un
+# swap de 2 GB evita que el OOM killer mate algo a mitad de camino.
+swap:
+  filename: /swapfile
+  size: 2G
+
+write_files:
+  - path: /usr/local/bin/automation-bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      APP_DIR=/opt/automation-manager
+
+      if [ ! -d "$APP_DIR/.git" ]; then
+        git clone --branch "${git_ref}" "${repo_url}" "$APP_DIR"
+      fi
+      cd "$APP_DIR"
+
+      # Los secretos se generan acá, en la VM, la primera vez -- nunca viajan
+      # por Terraform ni quedan en el tfstate. Si el .env ya existe (la VM se
+      # reinició, o se corre el script a mano de nuevo) no se tocan: rotar
+      # SECRET_KEY dejaría ilegibles los secretos ya guardados en la base.
+      if [ ! -f .env ]; then
+        umask 077
+        cat > .env <<EOF
+      POSTGRES_PASSWORD=$(openssl rand -hex 24)
+      SECRET_KEY=$(python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')
+      JWT_SECRET_KEY=$(openssl rand -hex 32)
+      NOTIFICATION_WEBHOOK_URL=${notification_webhook_url}
+      EOF
+      fi
+
+      docker compose up -d --build
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [/usr/local/bin/automation-bootstrap.sh]

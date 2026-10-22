@@ -12,3 +12,13 @@ htmlcov/
 .idea/
 dist/
 build/
+
+# Terraform: el state y las variables reales tienen IPs, IDs de suscripcion
+# y potencialmente secretos. El .terraform.lock.hcl SI se commitea (fija las
+# versiones exactas de los providers, igual que un requirements.txt).
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log

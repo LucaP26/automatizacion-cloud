@@ -1,3 +1,5 @@
+# Dependencias de runtime: lo que se instala en la imagen de producción.
+# Las de desarrollo/tests están en requirements-dev.txt.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 sqlalchemy==2.0.36
@@ -14,7 +16,5 @@ pyjwt==2.15.1
 email-validator==2.3.0
 python-multipart==0.0.32
 requests==2.34.2
-
-# dependencias de desarrollo / tests
-pytest==8.3.4
+# Runtime, no solo tests: lo usa app/services/notifier.py para el webhook.
 httpx==0.28.1

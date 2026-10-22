@@ -1,0 +1,102 @@
+# Stack completo: Postgres + migraciones + API + worker. Es el mismo archivo
+# que se usa en local y en la VM de Azure (infra/terraform): un solo lugar
+# que describe cómo se levanta el sistema.
+#
+#   docker compose up -d --build
+#
+# Lee variables del .env de la raíz (ver .env.example, sección Docker).
+
+name: automation-manager
+
+x-app: &app
+  build: .
+  image: automation-manager:latest
+  env_file: .env
+  environment: &app-env
+    # Pisa el DATABASE_URL del .env (que apunta a localhost, para correr
+    # uvicorn directo en el host): adentro de la red de compose la base se
+    # llama `db`.
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-automation_user}:${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}@db:5432/${POSTGRES_DB:-automation_db}
+  restart: unless-stopped
+
+# API y worker lanzan containers sandbox con el Docker del host. Necesitan:
+# - el socket del daemon (ver README: "Docker-outside-of-Docker");
+# - un directorio de ejecuciones montado con el MISMO path en host y
+#   container, porque el bind mount del sandbox lo resuelve el daemon en el
+#   filesystem del host.
+x-runs-sandboxes: &runs-sandboxes
+  environment:
+    <<: *app-env
+    EXECUTION_WORKDIR: /tmp/automation-runs
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - /tmp/automation-runs:/tmp/automation-runs
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    sandbox-image:
+      condition: service_completed_successfully
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-automation_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-automation_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Sin `ports`: la base solo es accesible desde la red interna de
+    # compose. Ni se expone a internet en la VM, ni choca con un Postgres
+    # que ya esté usando el 5432 en tu máquina.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # No es un servicio de verdad: existe para que `docker compose up --build`
+  # construya la imagen del sandbox junto con todo lo demás (sin ella, cada
+  # ejecución falla). Corre un print y termina; API y worker esperan a que
+  # termine bien antes de arrancar.
+  sandbox-image:
+    build:
+      context: docker
+      dockerfile: sandbox.Dockerfile
+    image: automation-sandbox:latest
+    command: ["-c", "print('imagen sandbox lista')"]
+    restart: "no"
+
+  # Migraciones como paso aparte, una sola vez por `up`, en vez de en el
+  # arranque de la API: con varias réplicas de la API, cada una correría
+  # `alembic upgrade` a la vez contra la misma base.
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: [*runs-sandboxes, *app]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    <<: [*runs-sandboxes, *app]
+    command: ["python", "-m", "app.worker"]
+    # Al apagarse, el worker espera a que termine la ejecución en curso (ver
+    # stop_scheduler). Los 10s por default de Docker son menos que el timeout
+    # de una ejecución (30s), y la cortaría con SIGKILL a la mitad.
+    stop_grace_period: 45s
+
+volumes:
+  pgdata:

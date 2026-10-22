@@ -23,6 +23,36 @@ de git.
 
 ---
 
+## 2026-10-22 — PC de escritorio
+
+**Fase 5 (infraestructura)** en la branch `fase-5-infra`. Decisiones que
+tomó Luca al arrancar: Azure = VM + docker compose (no Container Apps),
+worker separado de la API, Postgres en container en la VM (no Flexible
+Server). Para quien retome:
+
+- **El scheduler ya no corre en la API.** Vive en `app/worker.py`
+  (`python -m app.worker`) y reconcilia contra la tabla `automations` cada
+  `SCHEDULER_SYNC_INTERVAL_SECONDS` (30). Corriendo en el host sin el
+  worker, los crons no disparan (`POST /run` sí funciona).
+- **`requirements.txt` ahora es solo runtime** (se le sumó `httpx`, que el
+  notifier usa en runtime y estaba listado como dependencia de test). Para
+  desarrollo: `pip install -r requirements-dev.txt`.
+- **`TEST_DATABASE_URL` pasó a ser opcional en `Settings`** (los containers
+  no la necesitan); `tests/conftest.py` falla con un mensaje claro si falta.
+- **`.env` local necesita `POSTGRES_PASSWORD`** para `docker compose`
+  (se agregó `automation_pass` al `.env` de esta máquina).
+- **Docker Desktop ya funciona en esta máquina** (el pendiente de la
+  entrada del 2026-09-11 quedó resuelto en algún momento): el container
+  `automation-postgres` corre acá igual que en la laptop.
+- Terraform y Azure CLI **no están instalados** en esta máquina. Para
+  `fmt`/`validate` se usó un binario descargado en un directorio temporal;
+  el `apply` real contra Azure todavía no se corrió — lo tiene que hacer
+  Luca con `az login`.
+- Tests: 39 + 1 slow pasando; smoke test del compose OK (local y con el
+  `.env` mínimo que genera cloud-init).
+
+---
+
 ## 2026-10-22 — Laptop
 
 **Fase 4 (auth y notificaciones) completa**, en la branch `fase-4-auth`.

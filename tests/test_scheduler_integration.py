@@ -10,6 +10,10 @@ app.dependency_overrides), y una conexion de Postgres no puede ver datos
 todavia no comiteados de otra conexion/transaccion. Por eso estos tests
 usan la base real configurada (DATABASE_URL) y limpian a mano lo que crean.
 
+Desde la Fase 5 el scheduler no vive en la API sino en el worker
+(app/worker.py): el test arranca el scheduler + el sync del worker en este
+mismo proceso, igual que lo hace app.worker.main().
+
 Correr con: pytest tests/test_scheduler_integration.py -m slow
 """
 
@@ -21,6 +25,7 @@ from fastapi.testclient import TestClient
 from app.database import SessionLocal
 from app.main import app
 from app.models import Automation, Execution, ExecutionStatus, User
+from app.services.scheduler import start_scheduler, start_sync_job, stop_scheduler
 from app.services.security import create_access_token, hash_password
 
 pytestmark = pytest.mark.slow
@@ -42,6 +47,7 @@ def test_automation_with_minute_cron_runs_on_its_own():
     auth_headers = {"Authorization": f"Bearer {create_access_token(user.id)}"}
 
     automation_id = None
+    scheduler_started = False
     try:
         with TestClient(app) as client:
             response = client.post(
@@ -55,6 +61,13 @@ def test_automation_with_minute_cron_runs_on_its_own():
             )
             assert response.status_code == 201
             automation_id = response.json()["id"]
+
+            # La pasada inicial de start_sync_job ya levanta la automatización
+            # recién creada; el intervalo largo es para que no corra otra vez
+            # durante el test.
+            start_scheduler()
+            scheduler_started = True
+            start_sync_job(interval_seconds=3600)
 
             deadline = time.monotonic() + 65
             execution = None
@@ -80,6 +93,8 @@ def test_automation_with_minute_cron_runs_on_its_own():
             assert execution.status == ExecutionStatus.SUCCESS
             assert "corrida automatica" in execution.output_log
     finally:
+        if scheduler_started:
+            stop_scheduler()
         if automation_id is not None:
             automation = db.get(Automation, automation_id)
             if automation is not None:

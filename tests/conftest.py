@@ -9,6 +9,9 @@ from app.main import app
 from app.models import User
 from app.services.security import create_access_token, hash_password
 
+# Opcional en Settings (los containers de producción no la necesitan), pero
+# obligatoria para la suite: nunca caer en silencio a la base de desarrollo.
+assert settings.test_database_url, "Falta TEST_DATABASE_URL en el entorno/.env para correr los tests"
 test_engine = create_engine(settings.test_database_url)
 TestSessionLocal = sessionmaker(bind=test_engine, autoflush=False, autocommit=False)
 

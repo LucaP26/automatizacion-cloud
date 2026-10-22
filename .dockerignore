@@ -1,0 +1,18 @@
+# Todo lo que no hace falta para construir la imagen de la app. Además de
+# achicar el contexto de build, evita que un .env con secretos reales
+# termine copiado adentro de una capa de la imagen.
+.env
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.claude
+.vscode
+.idea
+tests
+infra
+scripts
+*.md

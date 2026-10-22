@@ -101,7 +101,12 @@ def run_automation_script(db: Session, automation: Automation) -> Execution:
 def _run_in_sandbox(
     execution: Execution, automation: Automation, secrets: dict[str, str]
 ) -> None:
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    # Ver `execution_workdir` en config.py: corriendo en docker-compose, el
+    # path del tempdir tiene que existir con el mismo nombre en el host.
+    workdir = settings.execution_workdir
+    if workdir is not None:
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=workdir) as tmp_dir:
         script_path = Path(tmp_dir) / "script.py"
         script_path.write_text(automation.script_code, encoding="utf-8")
 

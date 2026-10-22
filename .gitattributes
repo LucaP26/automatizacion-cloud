@@ -1,0 +1,5 @@
+# Los scripts que corren adentro de containers Linux (o en la VM) tienen
+# que tener fin de línea LF aunque se editen en Windows: con CRLF, el
+# shebang queda como "/bin/sh\r" y el container no arranca.
+*.sh text eol=lf
+*.tftpl text eol=lf

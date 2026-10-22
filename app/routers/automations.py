@@ -10,7 +10,6 @@ from app.schemas.automation import AutomationCreate, AutomationRead, AutomationU
 from app.schemas.execution import ExecutionRead
 from app.services.crypto import encrypt_secrets
 from app.services.executor import run_automation_script
-from app.services.scheduler import schedule_automation, unschedule_automation
 
 router = APIRouter(prefix="/automations", tags=["automations"])
 
@@ -48,8 +47,8 @@ def create_automation(
     db.add(automation)
     db.commit()
     db.refresh(automation)
-    if automation.is_active:
-        schedule_automation(automation)
+    # No se agenda acá: el worker (app/worker.py) levanta la automatización
+    # nueva en su próxima sincronización contra la base.
     return automation
 
 
@@ -84,11 +83,6 @@ def update_automation(
         setattr(automation, key, value)
     db.commit()
     db.refresh(automation)
-    if "cron_expression" in updated_fields or "is_active" in updated_fields:
-        if automation.is_active:
-            schedule_automation(automation)
-        else:
-            unschedule_automation(automation.id)
     return automation
 
 
@@ -101,7 +95,6 @@ def delete_automation(
     automation = _get_owned_automation_or_404(db, automation_id, current_user)
     db.delete(automation)
     db.commit()
-    unschedule_automation(automation_id)
     return None
 
 

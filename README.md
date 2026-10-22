@@ -2,7 +2,7 @@
 
 Plataforma web para registrar scripts de Python, programarlos con cron, ejecutarlos y ver el resultado de cada corrida. Proyecto de portfolio enfocado en backend + DevOps: arquitectura de API prolija, containerización con propósito y CI/CD real.
 
-## Estado actual: Fase 4 — Auth y notificaciones
+## Estado actual: Fase 5 — Infraestructura (proyecto completo)
 
 - CRUD de automatizaciones (`Automation`), **scopeado por usuario**: cada uno ve, edita, borra y corre solo las suyas.
 - Las automatizaciones activas corren solas según su cron (scheduler con APScheduler), o manualmente vía `POST /automations/{id}/run`.
@@ -11,14 +11,16 @@ Plataforma web para registrar scripts de Python, programarlos con cron, ejecutar
 - Secretos (variables de entorno) por automatización, encriptados en la base, inyectados al container solo en el momento de ejecutar.
 - **Autenticación con JWT**: `POST /auth/register` y `POST /auth/login`. Todos los endpoints de `/automations` requieren un token válido.
 - **Notificación por webhook** (p.ej. Slack) cuando una ejecución termina en `failed` — opcional, no-op si no está configurada.
-
-Fase siguiente (spec completa en `prompt_claude_code.md`): infraestructura con Docker Compose / Terraform / GitHub Actions.
+- **Todo el sistema en Docker Compose**: Postgres, migraciones, API y un **worker separado** que corre el scheduler. Un `docker compose up -d --build` levanta todo.
+- **Despliegue en Azure con Terraform**: una VM Linux que se bootstrapea sola con cloud-init y levanta el mismo `docker-compose.yml`. `terraform apply` / `terraform destroy` crean y borran todo.
+- **CI con GitHub Actions** en cada push: pytest + migraciones sobre base vacía, build de las imágenes + smoke test end-to-end del stack de compose, y `terraform fmt`/`validate`.
 
 ## Arquitectura
 
 ```
 app/
   main.py           # arma la app FastAPI y registra routers
+  worker.py         # proceso aparte que corre el scheduler (python -m app.worker)
   config.py         # settings desde variables de entorno (pydantic-settings)
   database.py       # engine/session de SQLAlchemy, Base declarativa, get_db()
   models/           # entidades ORM (User, Automation, Execution)
@@ -27,6 +29,12 @@ app/
   services/         # lógica de negocio: ejecución de scripts (executor.py) y scheduling (scheduler.py)
 alembic/            # migraciones de base de datos
 tests/              # pytest, contra una base de datos Postgres separada
+Dockerfile          # imagen de la app (API, worker y migraciones: misma imagen, distinto comando)
+docker/             # sandbox.Dockerfile (donde corre el código de usuarios) + entrypoint.sh
+docker-compose.yml  # stack completo: db, migrate, api, worker
+infra/terraform/    # VM en Azure + red + cloud-init
+.github/workflows/  # CI
+scripts/            # smoke-test.sh (end-to-end contra un stack levantado)
 ```
 
 Cada capa habla solo con la de al lado: el router no arma queries de negocio complejas ni corre subprocess directamente, el service no sabe nada de HTTP, y los schemas de Pydantic son independientes de los modelos de SQLAlchemy.
@@ -63,7 +71,7 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **Job store en memoria, no `SQLAlchemyJobStore`.** La fuente de verdad de qué debería estar programado es la tabla `automations` (con su `cron_expression` e `is_active`), no un almacén separado de APScheduler. En cada arranque de la API, el schedule completo se reconstruye leyendo las automatizaciones activas (`load_scheduled_automations`) — más simple que mantener una tabla `apscheduler_jobs` sincronizada aparte, y evita que las dos fuentes de verdad se desincronicen entre sí (por ejemplo, si alguien edita el cron directo en la base).
 
-**Hallazgo de APScheduler que vale la pena documentar:** `scheduler.add_job(..., replace_existing=True)` no deduplica si se llama *antes* de `scheduler.start()` — antes de arrancar, los jobs quedan en una lista interna (`_pending_jobs`) que no aplica `replace_existing` entre sí misma, y al arrancar, duplicados sobreviven todos. Por eso en el `lifespan` de `main.py` el scheduler arranca *antes* de cargar los jobs, no después.
+**Hallazgo de APScheduler que vale la pena documentar:** `scheduler.add_job(..., replace_existing=True)` no deduplica si se llama *antes* de `scheduler.start()` — antes de arrancar, los jobs quedan en una lista interna (`_pending_jobs`) que no aplica `replace_existing` entre sí misma, y al arrancar, duplicados sobreviven todos. Por eso el scheduler arranca *antes* de cargar los jobs, no después (hoy en `app/worker.py`; hasta la Fase 4, en el `lifespan` de `main.py`).
 
 **El scheduler usa la base real, no `get_db()`.** El job que dispara un cron corre en un hilo aparte, con su propia sesión (`SessionLocal` de `app.database` directo) — no pasa por la inyección de dependencias de FastAPI, así que `app.dependency_overrides` no lo alcanza en los tests. Por eso el test que verifica un cron disparando solo (`tests/test_scheduler_integration.py`) no usa las fixtures `client`/`db_session` de siempre: usa la base real configurada y limpia a mano lo que crea, en vez de depender del rollback automático del resto de la suite.
 
@@ -89,7 +97,62 @@ Cada capa habla solo con la de al lado: el router no arma queries de negocio com
 
 **Login corre el hash de verificación aunque el email no exista.** `bcrypt.checkpw` es deliberadamente lento (ese es el punto de bcrypt). Si solo se llamara cuando el usuario existe, un email no registrado respondería mucho más rápido que uno registrado con la contraseña incorrecta — una diferencia de tiempo medible que le permite a quien ataca enumerar qué emails están registrados, aunque el cuerpo de la respuesta sea siempre el mismo 401 genérico. Por eso se compara igual contra un hash fijo (`_DUMMY_HASH`) cuando el email no existe: el costo de bcrypt se paga en los dos casos.
 
+### Decisiones de la Fase 5 (infraestructura)
+
+**El scheduler sale de la API a un worker propio.** Hasta la Fase 4, APScheduler corría adentro del proceso de la API. Eso ata la API a una sola réplica: con `uvicorn --workers 2` (o dos containers de la API) habría dos schedulers y cada cron dispararía dos veces, que era el trade-off ya documentado al elegir APScheduler sobre Celery. Ahora el scheduler vive en `app/worker.py`, un proceso aparte con la misma imagen y otro comando. La API puede escalar; el worker es la única instancia que agenda.
+
+**El worker se entera de los cambios releyendo la base, no por mensajes.** Al separar los procesos, la API ya no puede llamar a `schedule_automation()` en la memoria del worker. Las alternativas eran un canal de mensajes (Redis pub/sub, o `LISTEN/NOTIFY` de Postgres) o reconciliar periódicamente. Se eligió lo segundo: cada `SCHEDULER_SYNC_INTERVAL_SECONDS` (30 por default) el worker lee las automatizaciones activas y hace un diff contra lo que tiene agendado. Agrega las nuevas, reagenda las que cambiaron de cron y saca las borradas o desactivadas. La tabla `automations` ya era la fuente de verdad del schedule desde la Fase 2, así que esto no agrega estado nuevo, y el worker se recupera solo de cualquier desincronización (una caída de la base, un cambio hecho a mano en SQL). El costo son hasta 30s de demora entre editar una automatización y que rija el cron nuevo. `LISTEN/NOTIFY` bajaría esa demora a casi cero, pero necesita una conexión dedicada escuchando y reconexión ante caídas. Y *igual* haría falta el sync completo al arrancar, porque los NOTIFY que llegan con el worker caído se pierden.
+
+**`POST /run` sigue ejecutando en la API.** La ejecución manual es síncrona: el cliente espera la `Execution` en la respuesta. Mandarla al worker obligaría a agregar una cola y un endpoint de polling, un cambio de contrato de la API. Por eso **los dos** containers (API y worker) lanzan containers sandbox.
+
+**Docker-outside-of-Docker: el socket del host, no Docker-in-Docker.** API y worker montan `/var/run/docker.sock` y crean los containers sandbox como *hermanos* suyos en el daemon del host. Docker-in-Docker (un daemon corriendo adentro de otro container) necesita `--privileged`, que es peor, y duplica el cache de imágenes. Hay que ser honesto con lo que implica: **acceso al socket de Docker equivale a root en el host**. Si alguien compromete la API, puede lanzar un container que monte `/`. Es aceptable acá porque la API ya es el componente de confianza que decide qué se ejecuta. La mitigación real sería un proxy del socket que solo permita las llamadas que usa el executor (p.ej. `tecnativa/docker-socket-proxy`), o mover la ejecución a otro host.
+
+**El bug que trae Docker-outside-of-Docker, y cómo se resolvió.** El executor escribe el script en un tempdir y lo monta en el sandbox (`volumes={tmp_dir: ...}`). Pero ese bind mount lo resuelve el **daemon del host**, que busca el path en *su* filesystem y no en el del container de la API, que es donde el tempdir existe de verdad. Con la API corriendo en compose, el sandbox habría montado un directorio vacío. La solución es `EXECUTION_WORKDIR`: compose monta `/tmp/automation-runs` **con el mismo path** en el host y en los containers de la API y del worker, y el executor crea sus tempdirs ahí adentro. Así, el path que ve la API es el mismo que ve el daemon. Con la API corriendo directo en el host (desarrollo), la variable queda vacía y se usa el temp del sistema, como antes. El smoke test del CI ejercita justamente este camino.
+
+**La imagen arranca como root y baja privilegios en el entrypoint.** `docker/entrypoint.sh` hace como root dos cosas que lo necesitan y después corre la app como el usuario `app` (UID 10002) con `setpriv`. Primero, crea el directorio de ejecuciones y se lo da a `app`, porque Docker lo crea como `root:root` si no existe en el host. Segundo, le da a `app` el grupo dueño del socket de Docker, leyendo el GID del socket montado. Ese GID lo asigna el paquete de Docker al instalarse, así que cambia entre máquinas (en la VM es el grupo `docker`, en Docker Desktop es 0) y no se puede fijar en el `Dockerfile`. Con el socket montado, correr como no-root no es una barrera de seguridad fuerte (ver arriba), pero igual limita lo que puede hacer un bug común en la app, como escribir en el filesystem del container.
+
+**Una imagen, tres roles.** API, worker y migraciones usan la misma imagen (`automation-manager:latest`) con distinto comando. Es un solo build y un solo artefacto, y garantiza que el worker y la API corran exactamente el mismo código (los dos usan `executor.py`). La imagen es single-stage: `psycopg[binary]` y las demás dependencias vienen como wheels precompilados, no hay nada que compilar, así que un stage de build aparte no achicaría nada.
+
+**Migraciones como servicio one-shot (`migrate`), no en el arranque de la API.** Si la API corriera `alembic upgrade head` al arrancar, dos réplicas lo harían a la vez contra la misma base. `migrate` corre una vez por `up`, y API y worker tienen `depends_on: condition: service_completed_successfully` sobre él, así que nunca arrancan contra un schema viejo. Mismo truco para la imagen del sandbox: el servicio `sandbox-image` existe solo para que `docker compose up --build` la construya. Antes era un paso manual del que había que acordarse.
+
+**Postgres sin puerto publicado.** El servicio `db` no tiene `ports`: solo se llega a él desde la red interna de compose. En la VM no queda expuesto a internet ni siquiera por un error en el NSG, y en local no choca con otro Postgres que ya use el 5432.
+
+**`stop_grace_period: 45s` en el worker.** Al apagarse (`docker compose down`, un deploy), el worker espera a que termine la ejecución en curso (`scheduler.shutdown(wait=True)`) para que la `Execution` no quede colgada en `running`. Docker manda SIGKILL a los 10s por default, que es menos que el timeout de una ejecución (30s).
+
+**Azure: una VM con compose, no Container Apps ni App Service.** El executor necesita un daemon de Docker para lanzar sandboxes, y los servicios PaaS de containers de Azure no exponen uno. Container Apps hubiera obligado a reescribir el executor contra Azure Container Instances (otro SDK, credenciales, ~30s de arranque por ejecución) y a pagar más. Con una VM, local y Azure corren el **mismo** `docker-compose.yml`: lo que pasa el smoke test en CI es lo que se despliega. El costo es que el sistema operativo queda a nuestro cargo (parches, reinicios), algo que un PaaS resolvería.
+
+**Postgres en un container de la VM, no Azure Database for PostgreSQL.** No suma costo y `terraform destroy` se lleva todo. A cambio, no hay backups gestionados ni alta disponibilidad: si se borra la VM, se borran los datos. Para un portfolio es aceptable; con datos reales, lo primero a cambiar sería pasar a Flexible Server.
+
+**Los secretos de la app se generan en la VM, nunca pasan por Terraform.** La primera vez que arranca la VM, cloud-init genera `POSTGRES_PASSWORD`, `SECRET_KEY` y `JWT_SECRET_KEY` con `openssl`/`os.urandom` y los escribe en un `.env` con permisos `600`. Si se pasaran como variables de Terraform, quedarían en texto plano en el `terraform.tfstate`, porque `sensitive = true` solo los oculta del output de la consola, no del state. Si el `.env` ya existe, no se regenera: rotar `SECRET_KEY` dejaría ilegibles los secretos que ya están encriptados en la base.
+
+**State de Terraform local, no remoto.** Para un equipo, lo correcto es un backend remoto (un Storage Account en Azure) que comparta el state y lo lockee. Pero ese Storage Account tendría que crearse antes y por fuera de este Terraform (el problema del huevo y la gallina), y `terraform destroy` ya no dejaría la suscripción vacía. Para una persona sola con Azure for Students, el state local es más simple, y `*.tfstate` está en `.gitignore`. El `.terraform.lock.hcl` sí se commitea: fija las versiones exactas de los providers, igual que `requirements.txt`.
+
+**Red mínima: SSH y la API, solo desde tu IP.** El NSG abre solo el 22 y el 8000, y solo para `allowed_source_cidr` (una validación de Terraform rechaza `0.0.0.0/0`). La API va por HTTP sin TLS, así que exponerla a todo internet mandaría contraseñas y tokens en texto plano. El próximo paso para abrirla al público sería un reverse proxy con HTTPS: Caddy en el compose, más un `domain_name_label` en la IP pública para tener un hostname.
+
+**CI en tres jobs que se complementan.** `tests` corre pytest con un Postgres como service container y además aplica las migraciones de Alembic sobre una base vacía. Como los tests usan `create_all()`, sin ese paso una migración rota pasaría el CI. `e2e` construye las imágenes, levanta el compose con el **mismo** `.env` mínimo que genera cloud-init en la VM y corre `scripts/smoke-test.sh`: registro → login → crear → ejecución manual en la API → ejecución por cron en el worker. Es el único test que prueba la app *dentro* de sus containers (red de compose, socket, directorio compartido, worker separado). `terraform` corre `fmt -check` y `validate` sin credenciales de Azure. El `apply` real queda manual a propósito: un `apply` automático en cada push gastaría crédito de Azure for Students y obligaría a guardar credenciales de Azure en GitHub. En el CI no hay ningún secreto real: las claves se generan descartables en cada corrida.
+
 ## Cómo levantarlo en local
+
+### Opción A: todo con Docker Compose (recomendado)
+
+Necesita solo Docker Desktop corriendo.
+
+```powershell
+copy .env.example .env   # y completar SECRET_KEY / JWT_SECRET_KEY (ver más abajo cómo generarlas)
+docker compose up -d --build
+```
+
+Construye las imágenes (app + sandbox), espera a que Postgres esté sano, corre las migraciones y levanta la API (`http://localhost:8000/docs`) y el worker. Para verificar todo el flujo de punta a punta:
+
+```powershell
+bash scripts/smoke-test.sh
+```
+
+Logs: `docker compose logs -f api worker`. Bajar todo: `docker compose down` (con `-v` también borra los datos de Postgres).
+
+### Opción B: desarrollo con la API y el worker en el host
+
+Útil para `--reload` y para correr `pytest`. Postgres sigue en Docker. Los pasos 1 a 6 de abajo son para esta opción.
 
 > Nota: si estás retomando este proyecto en una máquina distinta a la última
 > vez, mirá [`CLAUDE_PROGRESS.md`](CLAUDE_PROGRESS.md) antes de nada — ahí
@@ -126,7 +189,7 @@ docker exec automation-postgres psql -U automation_user -d automation_db -c "CRE
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
 Si PowerShell bloquea la activación con un error de ejecución de scripts:
@@ -163,13 +226,57 @@ Se construye una sola vez (no hace falta reconstruirla salvo que cambie `docker/
 alembic upgrade head
 ```
 
-### 6. Levantar la API
+### 6. Levantar la API y el worker
 
 ```powershell
 uvicorn app.main:app --reload
 ```
 
+En otra terminal, el worker (sin él, las automatizaciones no corren solas por cron; `POST /run` sí funciona):
+
+```powershell
+python -m app.worker
+```
+
 La API queda en `http://localhost:8000`, docs interactivas (Swagger, autogeneradas desde los schemas de Pydantic) en `http://localhost:8000/docs`.
+
+## Deploy en Azure (Terraform)
+
+Prerrequisitos: [Terraform](https://developer.hashicorp.com/terraform/install) ≥ 1.9, [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) y una clave SSH (`ssh-keygen -t ed25519` si no tenés una).
+
+```powershell
+az login
+cd infra/terraform
+copy terraform.tfvars.example terraform.tfvars   # completar subscription_id y allowed_source_cidr
+terraform init
+terraform plan
+terraform apply
+```
+
+`terraform apply` crea un resource group con una VNet, un NSG, una IP pública y una VM Ubuntu 24.04 (`Standard_B1s`, que entra en las horas gratis de Azure for Students). Al arrancar, cloud-init instala Docker, clona este repo, genera los secretos y corre `docker compose up -d --build`. El apply termina en unos 2 minutos, pero la API tarda unos 5 minutos más en quedar arriba, porque la VM está construyendo las imágenes. Para ver el progreso:
+
+```powershell
+ssh azureuser@<public_ip>             # o: terraform output ssh_command
+cloud-init status --wait              # en la VM; logs en /var/log/cloud-init-output.log
+```
+
+Para probarla desde tu máquina:
+
+```powershell
+bash scripts/smoke-test.sh $(terraform output -raw api_url)
+```
+
+**Bajar todo** (para no dejar la VM prendida gastando crédito):
+
+```powershell
+terraform destroy
+```
+
+Se lleva el resource group entero, datos incluidos. Para desplegar otra branch, poné `git_ref = "mi-branch"` en `terraform.tfvars`. El bootstrap corre solo en el primer arranque, así que un `apply` sobre una VM que ya existe no redespliega. Para actualizar el código: `ssh` a la VM, después `cd /opt/automation-manager && sudo git pull && sudo docker compose up -d --build`.
+
+## CI
+
+`.github/workflows/ci.yml` corre en cada push y en cada PR con tres jobs: `tests` (pytest + migraciones), `e2e` (build de las imágenes + smoke test del compose) y `terraform` (`fmt` + `validate`). El porqué de cada uno está en "Decisiones de la Fase 5".
 
 ## Cómo probarlo
 
